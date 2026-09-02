@@ -7,8 +7,8 @@ x-go-service: &go-service
     DATABASE_URL: "postgres://orderguard:orderguard@postgres:5432/orderguard?sslmode=disable"
     REDIS_ADDR: "redis:6379"
   depends_on:
-    postgres:
-      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
     redis:
       condition: service_healthy
   healthcheck:
@@ -26,6 +26,7 @@ services:
       POSTGRES_PASSWORD: orderguard
     volumes:
       - postgres-data:/var/lib/postgresql
+    ports: ["${POSTGRES_PORT:-55432}:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U orderguard -d orderguard"]
       interval: 5s
@@ -37,11 +38,33 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
+    ports: ["${REDIS_PORT:-56379}:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 12
+
+  migrate:
+    image: postgres:18-alpine
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: orderguard
+      PGUSER: orderguard
+      PGPASSWORD: orderguard
+    volumes:
+      - ../migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        for file in /migrations/orders/*.sql /migrations/payments/*.sql /migrations/inventory/*.sql; do
+          psql -v ON_ERROR_STOP=1 -f "$$file"
+        done
 
   order-service:
     <<: *go-service

@@ -1,0 +1,35 @@
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+
+# Go build and test artifacts
+/bin/
+*.test
+*.out
+coverage.*
+cpu.prof
+mem.prof
+
+# Frontend dependencies and build output
+/web/node_modules/
+/web/dist/
+/web/.vite/
+/web/coverage/
+
+# Runtime data and logs
+/data/
+/tmp/
+*.log
+*.pid
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating system files
+.DS_Store
+Thumbs.db

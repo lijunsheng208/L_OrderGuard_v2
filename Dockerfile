@@ -2,7 +2,10 @@
 FROM golang:1.26-alpine AS builder
 
 WORKDIR /src
-COPY go.mod ./
+ARG GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=${GOPROXY}
+COPY go.mod go.sum ./
+RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 
@@ -15,4 +18,3 @@ COPY --from=builder /out/orderguard /usr/local/bin/orderguard
 USER orderguard
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/orderguard"]
-
