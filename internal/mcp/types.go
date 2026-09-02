@@ -1,6 +1,10 @@
 package mcp
 
-import "encoding/json"
+import (
+	"context"
+	"encoding/json"
+	"time"
+)
 
 const ProtocolVersion = "2025-06-18"
 
@@ -77,4 +81,43 @@ type ToolError struct {
 	Message   string         `json:"message"`
 	Retryable bool           `json:"retryable"`
 	Details   map[string]any `json:"details,omitempty"`
+}
+
+// ToolOutput 是工具 Handler 返回的原始数据和证据来源。
+type ToolOutput struct {
+	Data           any
+	Source         string
+	EvidencePrefix string
+}
+
+// ToolHandler 执行一个已通过 Schema 校验的 MCP 工具。
+type ToolHandler func(context.Context, map[string]any) (ToolOutput, error)
+
+// ExecutionError 表示工具执行阶段的稳定业务错误。
+type ExecutionError struct {
+	Code      string
+	Message   string
+	Retryable bool
+	Details   map[string]any
+}
+
+// Error 返回工具执行错误信息。
+func (e *ExecutionError) Error() string {
+	return e.Message
+}
+
+// ToolCallAudit 保存一次 MCP 工具执行的审计数据。
+type ToolCallAudit struct {
+	RequestID  string
+	ServerName string
+	ToolName   string
+	Arguments  map[string]any
+	Envelope   Envelope
+	Duration   time.Duration
+	CalledAt   time.Time
+}
+
+// Auditor 定义 MCP 工具调用审计写入能力。
+type Auditor interface {
+	Record(context.Context, ToolCallAudit) error
 }

@@ -48,10 +48,25 @@ func (s *RedisStream) Publish(ctx context.Context, eventID string, payload any) 
 	if err != nil {
 		return fmt.Errorf("encode event: %w", err)
 	}
-	if err := s.client.XAdd(ctx, &redis.XAddArgs{
-		Stream: s.stream,
-		Values: map[string]any{"event_id": eventID, "payload": encoded},
-	}).Err(); err != nil {
+	var metadata struct {
+		AggregateID string `json:"aggregate_id"`
+		EventType   string `json:"event_type"`
+	}
+	if err := json.Unmarshal(encoded, &metadata); err != nil {
+		return fmt.Errorf("decode event metadata: %w", err)
+	}
+	if metadata.AggregateID == "" || metadata.EventType == "" {
+		return errors.New("event metadata is incomplete")
+	}
+	indexKey := "orderguard:event-index:" + metadata.AggregateID
+	script := redis.NewScript(`
+		local id = redis.call('XADD', KEYS[1], '*', 'event_id', ARGV[1], 'payload', ARGV[2])
+		redis.call('HSET', KEYS[2], 'type:' .. ARGV[3], id, 'event:' .. ARGV[1], id)
+		return id
+	`)
+	if err := script.Run(
+		ctx, s.client, []string{s.stream, indexKey}, eventID, encoded, metadata.EventType,
+	).Err(); err != nil {
 		return fmt.Errorf("publish event: %w", err)
 	}
 	return nil

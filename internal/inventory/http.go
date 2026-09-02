@@ -1,9 +1,11 @@
 package inventory
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/lijunsheng/orderguard/internal/httpx"
+	"github.com/lijunsheng/orderguard/internal/tracing"
 )
 
 // Handler 提供库存扣减和库存快照查询。
@@ -17,8 +19,23 @@ func NewHandler(repository *Repository) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", inventoryHealth)
 	mux.HandleFunc("GET /inventory/{id}/deductions", handler.getDeductions)
+	mux.HandleFunc("GET /inventory/{id}/status", handler.getStatus)
 	mux.HandleFunc("GET /stocks/{id}", handler.getStock)
-	return mux
+	return tracing.Middleware(mux)
+}
+
+// getStatus 返回订单维度的库存处理状态。
+func (h *Handler) getStatus(w http.ResponseWriter, request *http.Request) {
+	result, err := h.repository.GetOrderStatus(request.Context(), request.PathValue("id"))
+	if errors.Is(err, ErrOrderNotFound) {
+		httpx.WriteError(w, http.StatusNotFound, "ORDER_NOT_FOUND", err.Error())
+		return
+	}
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "QUERY_INVENTORY_FAILED", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, result)
 }
 
 // inventoryHealth 返回库存服务健康状态。

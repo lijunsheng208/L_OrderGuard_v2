@@ -6,12 +6,18 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
 
 type handlerTransport struct {
 	handler http.Handler
+}
+
+type memoryAuditor struct {
+	mu      sync.Mutex
+	records []ToolCallAudit
 }
 
 // RoundTrip 在内存中把客户端请求交给 MCP HTTP Handler。
@@ -21,12 +27,36 @@ func (transport handlerTransport) RoundTrip(request *http.Request) (*http.Respon
 	return recorder.Result(), nil
 }
 
+// Record 在线程安全的内存切片中保存审计记录。
+func (auditor *memoryAuditor) Record(_ context.Context, record ToolCallAudit) error {
+	auditor.mu.Lock()
+	defer auditor.mu.Unlock()
+	auditor.records = append(auditor.records, record)
+	return nil
+}
+
+// snapshot 返回当前审计记录副本。
+func (auditor *memoryAuditor) snapshot() []ToolCallAudit {
+	auditor.mu.Lock()
+	defer auditor.mu.Unlock()
+	return append([]ToolCallAudit(nil), auditor.records...)
+}
+
 // TestClientDiscoversAndCallsReadTool 验证阶段 0 的端到端 MCP 验收路径。
 func TestClientDiscoversAndCallsReadTool(t *testing.T) {
 	profile := Profiles()["business"]
 	handler := NewServer(
 		profile,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithToolHandler("get_order_snapshot", func(
+			_ context.Context,
+			arguments map[string]any,
+		) (ToolOutput, error) {
+			return ToolOutput{
+				Data:   map[string]any{"order_id": arguments["order_id"], "status": "PAID"},
+				Source: "order-service", EvidencePrefix: "order",
+			}, nil
+		}),
 	).Handler()
 
 	client := NewClient("http://mcp.local/mcp", &http.Client{
@@ -57,6 +87,71 @@ func TestClientDiscoversAndCallsReadTool(t *testing.T) {
 	if result.StructuredContent.EvidenceID == "" {
 		t.Fatal("evidence_id is empty")
 	}
+}
+
+// TestToolTimeoutMapsToStableError 验证 Handler 超时返回工具层错误而非 JSON-RPC 错误。
+func TestToolTimeoutMapsToStableError(t *testing.T) {
+	server := NewServer(
+		Profiles()["business"], slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithToolTimeout(10*time.Millisecond),
+		WithToolHandler("get_order_snapshot", func(
+			ctx context.Context,
+			_ map[string]any,
+		) (ToolOutput, error) {
+			<-ctx.Done()
+			return ToolOutput{}, ctx.Err()
+		}),
+	)
+	result := callTestTool(t, server, "get_order_snapshot")
+	if !result.IsError || result.StructuredContent.Error.Code != "UPSTREAM_TIMEOUT" {
+		t.Fatalf("unexpected timeout result: %+v", result)
+	}
+}
+
+// TestExecutionErrorAndAudit 验证稳定错误映射并审计成功和失败调用。
+func TestExecutionErrorAndAudit(t *testing.T) {
+	auditor := &memoryAuditor{}
+	server := NewServer(
+		Profiles()["business"], slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithAuditor(auditor),
+		WithToolHandler("get_order_snapshot", func(
+			_ context.Context,
+			_ map[string]any,
+		) (ToolOutput, error) {
+			return ToolOutput{Data: map[string]any{"status": "PAID"}}, nil
+		}),
+		WithToolHandler("get_payment_status", func(
+			_ context.Context,
+			_ map[string]any,
+		) (ToolOutput, error) {
+			return ToolOutput{}, &ExecutionError{Code: "NOT_FOUND", Message: "payment not found"}
+		}),
+	)
+	success := callTestTool(t, server, "get_order_snapshot")
+	failure := callTestTool(t, server, "get_payment_status")
+	if !success.StructuredContent.Success || !failure.IsError {
+		t.Fatalf("success=%+v failure=%+v", success, failure)
+	}
+	if failure.StructuredContent.Error.Code != "NOT_FOUND" {
+		t.Fatalf("error code = %s", failure.StructuredContent.Error.Code)
+	}
+	records := auditor.snapshot()
+	if len(records) != 2 || !records[0].Envelope.Success || records[1].Envelope.Success {
+		t.Fatalf("unexpected audit records: %+v", records)
+	}
+}
+
+// callTestTool 在内存 HTTP Server 上调用一个订单参数工具。
+func callTestTool(t *testing.T, server *Server, toolName string) ToolCallResult {
+	t.Helper()
+	client := NewClient("http://mcp.local/mcp", &http.Client{
+		Transport: handlerTransport{handler: server.Handler()},
+	})
+	result, err := client.CallTool(context.Background(), toolName, map[string]any{"order_id": "O1001"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 // TestProfilesKeepWriteToolIsolated 验证受控写工具不泄漏到只读 Server。

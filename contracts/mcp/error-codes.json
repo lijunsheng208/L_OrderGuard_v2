@@ -1,5 +1,5 @@
 {
-  "contract_version": "0.1.0",
+  "contract_version": "0.2.0",
   "protocol_errors": {
     "-32700": "无法解析 JSON",
     "-32600": "JSON-RPC 请求无效",
@@ -12,6 +12,7 @@
     "NOT_FOUND": {"retryable": false},
     "UPSTREAM_UNAVAILABLE": {"retryable": true},
     "UPSTREAM_TIMEOUT": {"retryable": true},
+    "UPSTREAM_INVALID_RESPONSE": {"retryable": false},
     "PERMISSION_DENIED": {"retryable": false},
     "POLICY_REJECTED": {"retryable": false},
     "CONFLICT": {"retryable": false},
@@ -19,4 +20,3 @@
     "INTERNAL": {"retryable": true}
   }
 }
-

@@ -1,6 +1,6 @@
-# MCP contract v0.1.0
+# MCP contract v0.2.0
 
-四个 MCP Server 使用 Streamable HTTP，端点均为 `POST /mcp`，协议版本为 `2025-06-18`。支持阶段 0 验收所需的 `initialize`、`ping`、`tools/list` 和 `tools/call`。
+四个 MCP Server 使用 Streamable HTTP，端点均为 `POST /mcp`，协议版本为 `2025-06-18`。支持 `initialize`、`ping`、`tools/list` 和 `tools/call`。
 
 工具名称与输入 JSON Schema 以 `internal/mcp/catalog.go` 为唯一可执行定义，Server 通过 `tools/list` 原样发布。工具分组如下：
 
@@ -11,5 +11,6 @@
 
 协议错误使用 JSON-RPC `error`；已进入工具但执行失败时，使用 `tool-result.schema.json` 中的统一结构，并设置 MCP `isError: true`。错误码清单见 `error-codes.json`。
 
-阶段 0 仅为 `get_order_snapshot` 提供契约冒烟响应，状态明确标记为 `UNKNOWN` 和 `CONTRACT_ONLY`。其余工具返回 `PHASE_NOT_IMPLEMENTED`，不会伪造尚未实现的业务能力。
+阶段 2 已为 `business-mcp` 和 `observability-mcp` 注册真实只读 Handler。未进入当前阶段的 `knowledge-mcp` 与 `remediation-mcp` 工具仍返回 `PHASE_NOT_IMPLEMENTED`，不会伪造业务能力。
 
+所有成功工具结果包含 `evidence_id`、`source`、`collected_at` 和原始结构化 `data`。工具执行失败使用稳定错误码并设置 `isError: true`；协议和 Schema 校验错误仍使用 JSON-RPC `error`。

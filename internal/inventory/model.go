@@ -7,6 +7,8 @@ type Status string
 
 const Deducted Status = "DEDUCTED"
 
+const NotDeducted Status = "NOT_DEDUCTED"
+
 // Item 表示待扣减商品。
 type Item struct {
 	SKUID    string `json:"sku_id"`
@@ -29,4 +31,13 @@ type Deduction struct {
 	IdempotencyKey string    `json:"idempotency_key"`
 	Status         Status    `json:"status"`
 	CreatedAt      time.Time `json:"created_at"`
+}
+
+// OrderStatus 汇总订单维度的库存扣减证据。
+type OrderStatus struct {
+	OrderID                  string      `json:"order_id"`
+	Status                   Status      `json:"status"`
+	Deductions               []Deduction `json:"deductions"`
+	SuccessfulDeductionCount int         `json:"successful_deduction_count"`
+	EventDeliveryCount       int         `json:"event_delivery_count"`
 }

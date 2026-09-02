@@ -29,6 +29,7 @@ type Event struct {
 	AggregateID string      `json:"aggregate_id"`
 	OccurredAt  time.Time   `json:"occurred_at"`
 	Producer    string      `json:"producer"`
+	TraceID     string      `json:"trace_id"`
 	Data        Payment     `json:"data"`
 	Items       []EventItem `json:"items"`
 }
@@ -36,5 +37,8 @@ type Event struct {
 // OutboxEvent 表示待发布的 Outbox 事件。
 type OutboxEvent struct {
 	Event
-	PublishStatus string `json:"publish_status"`
+	PublishStatus string     `json:"publish_status"`
+	Attempts      int        `json:"attempts"`
+	CreatedAt     time.Time  `json:"created_at"`
+	PublishedAt   *time.Time `json:"published_at,omitempty"`
 }

@@ -37,6 +37,16 @@ type Order struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+// StateChange 表示订单状态机的一次不可变变更记录。
+type StateChange struct {
+	Version    int64     `json:"version"`
+	FromStatus *Status   `json:"from_status"`
+	ToStatus   Status    `json:"to_status"`
+	Reason     string    `json:"reason"`
+	TraceID    string    `json:"trace_id,omitempty"`
+	ChangedAt  time.Time `json:"changed_at"`
+}
+
 // New 校验输入并创建待支付订单。
 func New(id, userID string, items []Item) (Order, error) {
 	if id == "" || userID == "" || len(items) == 0 {

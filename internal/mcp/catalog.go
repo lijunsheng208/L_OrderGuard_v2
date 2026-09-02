@@ -12,7 +12,7 @@ func Profiles() map[string]ServerProfile {
 	return map[string]ServerProfile{
 		"business": {
 			Name:    "business-mcp",
-			Version: "0.1.0",
+			Version: "0.2.0",
 			Tools: []Tool{
 				readTool("get_order_snapshot", "查询订单快照", objectSchema(
 					fields{"order_id": stringField("订单 ID")}, "order_id",
@@ -30,7 +30,7 @@ func Profiles() map[string]ServerProfile {
 		},
 		"observability": {
 			Name:    "observability-mcp",
-			Version: "0.1.0",
+			Version: "0.2.0",
 			Tools: []Tool{
 				readTool("search_service_logs", "按服务和订单检索日志", objectSchema(fields{
 					"service": stringField("服务名"), "order_id": stringField("订单 ID"),
@@ -40,7 +40,9 @@ func Profiles() map[string]ServerProfile {
 					fields{"trace_id": stringField("Trace ID")}, "trace_id",
 				)),
 				readTool("get_metric", "查询服务指标", objectSchema(fields{
-					"service": stringField("服务名"), "metric": stringField("指标名"),
+					"service": stringField("服务名"), "metric": enumStringField(
+						"指标名", "operations_total", "operations_failed_total", "operation_duration_ms_avg",
+					),
 					"from": dateTimeField("开始时间"), "to": dateTimeField("结束时间"),
 				}, "service", "metric", "from", "to")),
 				readTool("get_event_record", "查询订单事件记录", objectSchema(fields{
@@ -124,6 +126,13 @@ func objectSchema(properties fields, required ...string) map[string]any {
 // stringField 创建非空字符串字段。
 func stringField(description string) map[string]any {
 	return map[string]any{"type": "string", "minLength": 1, "description": description}
+}
+
+// enumStringField 创建限定枚举值的字符串字段。
+func enumStringField(description string, values ...string) map[string]any {
+	return map[string]any{
+		"type": "string", "minLength": 1, "description": description, "enum": values,
+	}
 }
 
 // dateTimeField 创建 RFC 3339 时间字段。

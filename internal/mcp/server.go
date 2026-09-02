@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -12,15 +13,60 @@ import (
 	"time"
 )
 
-// Server 实现阶段 0 所需的 MCP Streamable HTTP 端点。
+// Server 实现可注入工具 Handler 的 MCP Streamable HTTP 端点。
 type Server struct {
-	profile ServerProfile
-	logger  *slog.Logger
+	profile  ServerProfile
+	logger   *slog.Logger
+	handlers map[string]ToolHandler
+	auditor  Auditor
+	timeout  time.Duration
+}
+
+// Option 配置 MCP Server 的可选行为。
+type Option func(*Server)
+
+// WithToolHandler 为指定工具注册执行 Handler。
+func WithToolHandler(name string, handler ToolHandler) Option {
+	return func(server *Server) {
+		server.handlers[name] = handler
+	}
+}
+
+// WithToolHandlers 批量注册工具 Handler。
+func WithToolHandlers(handlers map[string]ToolHandler) Option {
+	return func(server *Server) {
+		for name, handler := range handlers {
+			server.handlers[name] = handler
+		}
+	}
+}
+
+// WithAuditor 配置工具调用审计器。
+func WithAuditor(auditor Auditor) Option {
+	return func(server *Server) {
+		server.auditor = auditor
+	}
+}
+
+// WithToolTimeout 配置单次工具执行超时。
+func WithToolTimeout(timeout time.Duration) Option {
+	return func(server *Server) {
+		server.timeout = timeout
+	}
 }
 
 // NewServer 创建一个使用指定工具配置的 MCP Server。
-func NewServer(profile ServerProfile, logger *slog.Logger) *Server {
-	return &Server{profile: profile, logger: logger}
+func NewServer(profile ServerProfile, logger *slog.Logger, options ...Option) *Server {
+	server := &Server{
+		profile:  profile,
+		logger:   logger,
+		handlers: make(map[string]ToolHandler),
+		timeout:  3 * time.Second,
+	}
+	for _, option := range options {
+		option(server)
+	}
+	return server
 }
 
 // Handler 返回 MCP Server 的 HTTP 路由。
@@ -59,11 +105,11 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.Info("mcp request", "server", s.profile.Name, "method", request.Method)
-	s.dispatch(w, request)
+	s.dispatch(r.Context(), w, request)
 }
 
 // dispatch 执行 MCP 方法并生成协议响应。
-func (s *Server) dispatch(w http.ResponseWriter, request Request) {
+func (s *Server) dispatch(ctx context.Context, w http.ResponseWriter, request Request) {
 	switch request.Method {
 	case "initialize":
 		s.writeResult(w, request.ID, map[string]any{
@@ -78,14 +124,18 @@ func (s *Server) dispatch(w http.ResponseWriter, request Request) {
 	case "tools/list":
 		s.writeResult(w, request.ID, map[string]any{"tools": s.profile.Tools})
 	case "tools/call":
-		s.handleToolCall(w, request)
+		s.handleToolCall(ctx, w, request)
 	default:
 		s.writeRPCError(w, request.ID, -32601, "method not found", nil)
 	}
 }
 
-// handleToolCall 校验工具参数并返回阶段 0 契约结果。
-func (s *Server) handleToolCall(w http.ResponseWriter, request Request) {
+// handleToolCall 校验参数、执行工具并写入审计。
+func (s *Server) handleToolCall(
+	ctx context.Context,
+	w http.ResponseWriter,
+	request Request,
+) {
 	var params ToolCallParams
 	if err := json.Unmarshal(request.Params, &params); err != nil {
 		s.writeRPCError(w, request.ID, -32602, "invalid params", nil)
@@ -104,7 +154,9 @@ func (s *Server) handleToolCall(w http.ResponseWriter, request Request) {
 		return
 	}
 
-	envelope := s.executeContractStub(tool, params.Arguments)
+	startedAt := time.Now().UTC()
+	envelope := s.executeTool(ctx, tool, params.Arguments)
+	s.recordAudit(request.ID, tool.Name, params.Arguments, envelope, startedAt)
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
 		s.writeRPCError(w, request.ID, -32603, "internal error", nil)
@@ -118,33 +170,92 @@ func (s *Server) handleToolCall(w http.ResponseWriter, request Request) {
 	})
 }
 
-// executeContractStub 执行阶段 0 唯一的冒烟查询，其余工具明确返回未实现。
-func (s *Server) executeContractStub(tool Tool, arguments map[string]any) Envelope {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if s.profile.Name == "business-mcp" && tool.Name == "get_order_snapshot" {
-		return Envelope{
-			Success: true,
-			Data: map[string]any{
-				"order_id": arguments["order_id"],
-				"status":   "UNKNOWN",
-				"phase":    "CONTRACT_ONLY",
+// executeTool 在超时边界内执行注册的 Handler。
+func (s *Server) executeTool(
+	ctx context.Context,
+	tool Tool,
+	arguments map[string]any,
+) Envelope {
+	collectedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	handler, ok := s.handlers[tool.Name]
+	if !ok {
+		return failedEnvelope(
+			s.profile.Name,
+			collectedAt,
+			&ExecutionError{
+				Code:    "PHASE_NOT_IMPLEMENTED",
+				Message: "tool implementation is outside the current phase",
+				Details: map[string]any{"tool": tool.Name},
 			},
-			EvidenceID:  newEvidenceID("order"),
-			Source:      "business-mcp-contract",
-			CollectedAt: now,
-		}
+		)
 	}
 
+	toolCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	output, err := handler(toolCtx, arguments)
+	collectedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(toolCtx.Err(), context.DeadlineExceeded) {
+			err = &ExecutionError{
+				Code: "UPSTREAM_TIMEOUT", Message: "tool execution timed out", Retryable: true,
+			}
+		}
+		return failedEnvelope(s.profile.Name, collectedAt, err)
+	}
+
+	source := output.Source
+	if source == "" {
+		source = s.profile.Name
+	}
+	prefix := output.EvidencePrefix
+	if prefix == "" {
+		prefix = "tool"
+	}
+	return Envelope{
+		Success: true, Data: output.Data,
+		EvidenceID: newEvidenceID(prefix), Source: source, CollectedAt: collectedAt,
+	}
+}
+
+// failedEnvelope 把执行错误映射为统一工具错误结构。
+func failedEnvelope(source, collectedAt string, err error) Envelope {
+	toolErr := &ExecutionError{
+		Code: "INTERNAL", Message: err.Error(), Retryable: true,
+	}
+	var executionErr *ExecutionError
+	if errors.As(err, &executionErr) {
+		toolErr = executionErr
+	}
 	return Envelope{
 		Success: false,
 		Error: &ToolError{
-			Code:      "PHASE_NOT_IMPLEMENTED",
-			Message:   "tool implementation is outside phase 0",
-			Retryable: false,
-			Details:   map[string]any{"tool": tool.Name},
+			Code: toolErr.Code, Message: toolErr.Message,
+			Retryable: toolErr.Retryable, Details: toolErr.Details,
 		},
-		Source:      s.profile.Name,
-		CollectedAt: now,
+		Source: source, CollectedAt: collectedAt,
+	}
+}
+
+// recordAudit 异步边界外记录已执行工具，审计失败不改变工具结果。
+func (s *Server) recordAudit(
+	requestID json.RawMessage,
+	toolName string,
+	arguments map[string]any,
+	envelope Envelope,
+	startedAt time.Time,
+) {
+	if s.auditor == nil {
+		return
+	}
+	auditCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	record := ToolCallAudit{
+		RequestID: string(requestID), ServerName: s.profile.Name,
+		ToolName: toolName, Arguments: arguments, Envelope: envelope,
+		Duration: time.Since(startedAt), CalledAt: startedAt,
+	}
+	if err := s.auditor.Record(auditCtx, record); err != nil {
+		s.logger.Error("record mcp audit", "tool", toolName, "error", err)
 	}
 }
 
@@ -158,7 +269,7 @@ func (s *Server) findTool(name string) (Tool, bool) {
 	return Tool{}, false
 }
 
-// validateArguments 校验阶段 0 Schema 中冻结的必填字段和基础类型。
+// validateArguments 校验工具 Schema 中定义的必填字段和基础类型。
 func validateArguments(tool Tool, arguments map[string]any) error {
 	if arguments == nil {
 		arguments = map[string]any{}
@@ -177,6 +288,18 @@ func validateValue(name string, value any, definition map[string]any) error {
 		if definition["format"] == "date-time" {
 			if _, err := time.Parse(time.RFC3339, text); err != nil {
 				return fmt.Errorf("field %q must be an RFC 3339 timestamp", name)
+			}
+		}
+		if values, ok := definition["enum"].([]string); ok {
+			matched := false
+			for _, candidate := range values {
+				if text == candidate {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return fmt.Errorf("field %q is not an allowed value", name)
 			}
 		}
 	case "array":

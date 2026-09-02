@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lijunsheng/orderguard/internal/eventbus"
+	"github.com/lijunsheng/orderguard/internal/telemetry"
+	"github.com/lijunsheng/orderguard/internal/tracing"
 )
 
 var (
@@ -46,10 +48,11 @@ func (r *Repository) Pay(
 	defer tx.Rollback(ctx)
 
 	var orderAmount int64
+	var orderVersion int64
 	var orderStatus string
 	err = tx.QueryRow(ctx, `
-		SELECT amount, status FROM orders.orders WHERE id = $1 FOR UPDATE`, orderID,
-	).Scan(&orderAmount, &orderStatus)
+		SELECT amount, status, version FROM orders.orders WHERE id = $1 FOR UPDATE`, orderID,
+	).Scan(&orderAmount, &orderStatus, &orderVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Payment{}, ErrOrderNotFound
 	}
@@ -70,12 +73,16 @@ func (r *Repository) Pay(
 	if found {
 		return existing, tx.Commit(ctx)
 	}
+	if orderStatus != "PENDING_PAYMENT" {
+		return Payment{}, ErrOrderNotPayable
+	}
 	items, err := getOrderItemsTx(ctx, tx, orderID)
 	if err != nil {
 		return Payment{}, err
 	}
 
 	now := time.Now().UTC()
+	traceID := tracing.ID(ctx)
 	created := Payment{
 		ID: paymentID, OrderID: orderID, Amount: amount,
 		Status: Success, PaidAt: now,
@@ -96,11 +103,20 @@ func (r *Repository) Pay(
 	if err != nil {
 		return Payment{}, fmt.Errorf("mark order paid: %w", err)
 	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO orders.state_history (
+			order_id, version, from_status, to_status, reason, trace_id, changed_at
+		) VALUES ($1, $2, 'PENDING_PAYMENT', 'PAID', 'PAYMENT_SUCCEEDED', $3, $4)`,
+		orderID, orderVersion+1, traceID, now,
+	)
+	if err != nil {
+		return Payment{}, fmt.Errorf("insert paid order history: %w", err)
+	}
 
 	event := Event{
 		EventID: "evt_" + paymentID, EventType: "payment.succeeded",
 		AggregateID: orderID, OccurredAt: now,
-		Producer: "payment-service", Data: created, Items: items,
+		Producer: "payment-service", TraceID: traceID, Data: created, Items: items,
 	}
 	payload, err := json.Marshal(event)
 	if err != nil {
@@ -114,6 +130,15 @@ func (r *Repository) Pay(
 	)
 	if err != nil {
 		return Payment{}, fmt.Errorf("insert outbox event: %w", err)
+	}
+	if err := telemetry.RecordTx(ctx, tx, telemetry.Signal{
+		TraceID: traceID, OrderID: orderID, Service: "payment-service",
+		Type: "LOG", Operation: "commit_payment", Status: "OK",
+		Message:    "payment committed and outbox event created",
+		Attributes: map[string]any{"payment_id": paymentID, "event_id": event.EventID},
+		StartedAt:  now, FinishedAt: time.Now().UTC(),
+	}); err != nil {
+		return Payment{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Payment{}, fmt.Errorf("commit payment: %w", err)
@@ -137,18 +162,29 @@ func (r *Repository) Get(ctx context.Context, orderID string) (Payment, error) {
 	return result, nil
 }
 
-// GetOutboxStatus 返回订单最新支付事件的发布状态。
-func (r *Repository) GetOutboxStatus(ctx context.Context, orderID string) (string, error) {
-	var status string
+// GetOutboxStatus 返回订单最新支付事件及其发布状态。
+func (r *Repository) GetOutboxStatus(ctx context.Context, orderID string) (OutboxEvent, error) {
+	var result OutboxEvent
+	var payload []byte
 	err := r.db.QueryRow(ctx, `
-		SELECT publish_status FROM payments.outbox_events
+		SELECT payload, publish_status, attempts, created_at, published_at
+		FROM payments.outbox_events
 		WHERE aggregate_id = $1 AND event_type = 'payment.succeeded'
 		ORDER BY created_at DESC LIMIT 1`, orderID,
-	).Scan(&status)
+	).Scan(
+		&payload, &result.PublishStatus, &result.Attempts,
+		&result.CreatedAt, &result.PublishedAt,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrOrderNotFound
+		return OutboxEvent{}, ErrOrderNotFound
 	}
-	return status, err
+	if err != nil {
+		return OutboxEvent{}, fmt.Errorf("query outbox status: %w", err)
+	}
+	if err := json.Unmarshal(payload, &result.Event); err != nil {
+		return OutboxEvent{}, fmt.Errorf("decode outbox status: %w", err)
+	}
+	return result, nil
 }
 
 // PendingOutbox 返回待发布事件。
@@ -194,13 +230,32 @@ func (r *Repository) PublishPending(
 		if err := stream.Publish(ctx, item.EventID, item.Event); err != nil {
 			return published, err
 		}
-		_, err := r.db.Exec(ctx, `
+		tx, err := r.db.BeginTx(ctx, pgx.TxOptions{})
+		if err != nil {
+			return published, fmt.Errorf("begin mark outbox published: %w", err)
+		}
+		_, err = tx.Exec(ctx, `
 			UPDATE payments.outbox_events
 			SET publish_status = 'PUBLISHED', attempts = attempts + 1, published_at = now()
 			WHERE event_id = $1 AND publish_status = 'PENDING'`, item.EventID,
 		)
 		if err != nil {
+			tx.Rollback(ctx)
 			return published, fmt.Errorf("mark outbox published: %w", err)
+		}
+		now := time.Now().UTC()
+		if err := telemetry.RecordTx(ctx, tx, telemetry.Signal{
+			TraceID: item.TraceID, OrderID: item.AggregateID, Service: "payment-service",
+			Type: "LOG", Operation: "publish_outbox", Status: "OK",
+			Message:    "outbox event published to redis stream",
+			Attributes: map[string]any{"event_id": item.EventID, "event_type": item.EventType},
+			StartedAt:  now, FinishedAt: now,
+		}); err != nil {
+			tx.Rollback(ctx)
+			return published, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return published, fmt.Errorf("commit mark outbox published: %w", err)
 		}
 		published++
 	}

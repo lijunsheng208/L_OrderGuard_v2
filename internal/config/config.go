@@ -17,6 +17,21 @@ func EventStream() string {
 	return value("EVENT_STREAM", "orderguard.events")
 }
 
+// OrderServiceURL 返回订单服务基础地址。
+func OrderServiceURL() string {
+	return value("ORDER_SERVICE_URL", "http://localhost:8081")
+}
+
+// PaymentServiceURL 返回支付服务基础地址。
+func PaymentServiceURL() string {
+	return value("PAYMENT_SERVICE_URL", "http://localhost:8082")
+}
+
+// InventoryServiceURL 返回库存服务基础地址。
+func InventoryServiceURL() string {
+	return value("INVENTORY_SERVICE_URL", "http://localhost:8083")
+}
+
 // value 读取环境变量，未设置时返回默认值。
 func value(key, fallback string) string {
 	if result := os.Getenv(key); result != "" {

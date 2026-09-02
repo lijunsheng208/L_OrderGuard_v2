@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/lijunsheng/orderguard/internal/httpx"
+	"github.com/lijunsheng/orderguard/internal/tracing"
 )
 
 // Handler 提供支付和 Outbox 状态查询接口。
@@ -21,7 +22,7 @@ func NewHandler(repository *Repository) http.Handler {
 	mux.HandleFunc("POST /demo/orders/{id}/pay", handler.pay)
 	mux.HandleFunc("GET /payments/{id}", handler.get)
 	mux.HandleFunc("GET /events/{id}/payment-succeeded", handler.getEvent)
-	return mux
+	return tracing.Middleware(mux)
 }
 
 // paymentHealth 返回支付服务健康状态。
@@ -72,7 +73,7 @@ func (h *Handler) get(w http.ResponseWriter, request *http.Request) {
 
 // getEvent 返回订单支付成功事件的 Outbox 状态。
 func (h *Handler) getEvent(w http.ResponseWriter, request *http.Request) {
-	status, err := h.repository.GetOutboxStatus(
+	result, err := h.repository.GetOutboxStatus(
 		request.Context(), request.PathValue("id"),
 	)
 	if errors.Is(err, ErrOrderNotFound) {
@@ -84,8 +85,9 @@ func (h *Handler) getEvent(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"order_id":       request.PathValue("id"),
-		"publish_status": status,
-		"published":      status == "PUBLISHED",
+		"order_id": request.PathValue("id"), "event_id": result.EventID,
+		"event_type": result.EventType, "publish_status": result.PublishStatus,
+		"published": result.PublishStatus == "PUBLISHED", "attempts": result.Attempts,
+		"created_at": result.CreatedAt, "published_at": result.PublishedAt,
 	})
 }

@@ -10,9 +10,14 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lijunsheng/orderguard/internal/payment"
+	"github.com/lijunsheng/orderguard/internal/telemetry"
+	"github.com/lijunsheng/orderguard/internal/tracing"
 )
 
-var ErrInsufficientStock = errors.New("insufficient stock")
+var (
+	ErrInsufficientStock = errors.New("insufficient stock")
+	ErrOrderNotFound     = errors.New("order not found")
+)
 
 // Repository 在事务中处理库存扣减和消费幂等。
 type Repository struct {
@@ -37,6 +42,10 @@ func (r *Repository) Consume(
 		return nil, fmt.Errorf("begin inventory deduction: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	traceID := event.TraceID
+	if traceID == "" {
+		traceID = tracing.NewID()
+	}
 
 	var consumed bool
 	err = tx.QueryRow(ctx, `
@@ -123,8 +132,53 @@ func (r *Repository) Consume(
 	if err != nil {
 		return nil, fmt.Errorf("record consumed event: %w", err)
 	}
+	now := time.Now().UTC()
+	if err := telemetry.RecordTx(ctx, tx, telemetry.Signal{
+		TraceID: traceID, OrderID: event.AggregateID, Service: "inventory-service",
+		Type: "LOG", Operation: "deduct_inventory", Status: "OK",
+		Message: "payment event consumed and inventory deducted",
+		Attributes: map[string]any{
+			"event_id": event.EventID, "deduction_count": len(result),
+		},
+		StartedAt: now, FinishedAt: now,
+	}); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit inventory deduction: %w", err)
+	}
+	return result, nil
+}
+
+// GetOrderStatus 返回已存在订单的库存扣减汇总。
+func (r *Repository) GetOrderStatus(ctx context.Context, orderID string) (OrderStatus, error) {
+	var exists bool
+	if err := r.db.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM orders.orders WHERE id = $1)`, orderID,
+	).Scan(&exists); err != nil {
+		return OrderStatus{}, fmt.Errorf("query order existence: %w", err)
+	}
+	if !exists {
+		return OrderStatus{}, ErrOrderNotFound
+	}
+	deductions, err := r.GetDeductions(ctx, orderID)
+	if err != nil {
+		return OrderStatus{}, err
+	}
+	result := OrderStatus{
+		OrderID: orderID, Status: NotDeducted, Deductions: deductions,
+		SuccessfulDeductionCount: len(deductions),
+	}
+	if len(deductions) > 0 {
+		result.Status = Deducted
+	}
+	if err := r.db.QueryRow(ctx, `
+		SELECT COALESCE(MAX(delivery_count), 0)
+		FROM inventory.consumed_events consumed
+		JOIN payments.outbox_events event ON event.event_id = consumed.event_id
+		WHERE event.aggregate_id = $1`, orderID,
+	).Scan(&result.EventDeliveryCount); err != nil {
+		return OrderStatus{}, fmt.Errorf("query event delivery count: %w", err)
 	}
 	return result, nil
 }
