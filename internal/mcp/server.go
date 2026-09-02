@@ -105,7 +105,8 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.Info("mcp request", "server", s.profile.Name, "method", request.Method)
-	s.dispatch(r.Context(), w, request)
+	ctx := context.WithValue(r.Context(), requestMetadataKey{}, metadataFromRequest(r))
+	s.dispatch(ctx, w, request)
 }
 
 // dispatch 执行 MCP 方法并生成协议响应。
@@ -156,7 +157,7 @@ func (s *Server) handleToolCall(
 
 	startedAt := time.Now().UTC()
 	envelope := s.executeTool(ctx, tool, params.Arguments)
-	s.recordAudit(request.ID, tool.Name, params.Arguments, envelope, startedAt)
+	s.recordAudit(ctx, request.ID, tool.Name, params.Arguments, envelope, startedAt)
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
 		s.writeRPCError(w, request.ID, -32603, "internal error", nil)
@@ -238,6 +239,7 @@ func failedEnvelope(source, collectedAt string, err error) Envelope {
 
 // recordAudit 异步边界外记录已执行工具，审计失败不改变工具结果。
 func (s *Server) recordAudit(
+	ctx context.Context,
 	requestID json.RawMessage,
 	toolName string,
 	arguments map[string]any,
@@ -251,12 +253,32 @@ func (s *Server) recordAudit(
 	defer cancel()
 	record := ToolCallAudit{
 		RequestID: string(requestID), ServerName: s.profile.Name,
-		ToolName: toolName, Arguments: arguments, Envelope: envelope,
+		ToolName: toolName, Metadata: requestMetadata(ctx),
+		Arguments: arguments, Envelope: envelope,
 		Duration: time.Since(startedAt), CalledAt: startedAt,
 	}
 	if err := s.auditor.Record(auditCtx, record); err != nil {
 		s.logger.Error("record mcp audit", "tool", toolName, "error", err)
 	}
+}
+
+type requestMetadataKey struct{}
+
+// metadataFromRequest 读取 Runtime 传递的 MCP 调用关联信息。
+func metadataFromRequest(request *http.Request) RequestMetadata {
+	return RequestMetadata{
+		RunID:       request.Header.Get("X-Run-ID"),
+		AgentStepID: request.Header.Get("X-Agent-Step-ID"),
+		TraceID:     request.Header.Get("X-Trace-ID"),
+		ToolCallID:  request.Header.Get("X-Tool-Call-ID"),
+		Caller:      request.Header.Get("X-MCP-Caller"),
+	}
+}
+
+// requestMetadata 返回上下文中的 MCP 调用关联信息。
+func requestMetadata(ctx context.Context) RequestMetadata {
+	metadata, _ := ctx.Value(requestMetadataKey{}).(RequestMetadata)
+	return metadata
 }
 
 // findTool 按名称查找当前 Server 暴露的工具。
@@ -275,6 +297,11 @@ func validateArguments(tool Tool, arguments map[string]any) error {
 		arguments = map[string]any{}
 	}
 	return validateObject("arguments", arguments, tool.InputSchema)
+}
+
+// ValidateToolArguments 对外校验工具参数是否符合 MCP Schema。
+func ValidateToolArguments(tool Tool, arguments map[string]any) error {
+	return validateArguments(tool, arguments)
 }
 
 // validateValue 递归校验当前契约使用的 JSON Schema 类型。

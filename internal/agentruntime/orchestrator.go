@@ -1,0 +1,152 @@
+package agentruntime
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"time"
+)
+
+// Orchestrator 按阶段 3 状态机编排 Planner 和 Investigator。
+type Orchestrator struct {
+	repository   *Repository
+	planner      *Planner
+	investigator *Investigator
+	logger       *slog.Logger
+	runTimeout   time.Duration
+}
+
+// NewOrchestrator 创建阶段 3 Agent 编排器。
+func NewOrchestrator(
+	repository *Repository,
+	planner *Planner,
+	investigator *Investigator,
+	logger *slog.Logger,
+) *Orchestrator {
+	return &Orchestrator{
+		repository: repository, planner: planner, investigator: investigator,
+		logger: logger, runTimeout: 60 * time.Second,
+	}
+}
+
+// Ready 返回 Planner 和 Investigator 是否已经配置。
+func (o *Orchestrator) Ready() bool {
+	return o != nil && o.planner != nil && o.investigator != nil
+}
+
+// Process 执行一个已处于 PLANNING 状态的调查任务。
+func (o *Orchestrator) Process(parent context.Context, run Run) error {
+	if !o.Ready() {
+		return errors.New("agent model is not configured")
+	}
+	ctx, cancel := context.WithTimeout(parent, o.runTimeout)
+	defer cancel()
+
+	plannerStep, err := o.repository.StartStep(
+		ctx, run.ID, "PLANNER", o.planner.ModelName(), map[string]any{
+			"message": run.UserMessage, "order_id": run.OrderID,
+		},
+	)
+	if err != nil {
+		return err
+	}
+	plannerOutput, err := o.planner.Run(ctx, run)
+	if err != nil {
+		_ = o.repository.FinishStep(ctx, &plannerStep, map[string]any{
+			"raw": plannerOutput.Raw, "error": err.Error(),
+		}, plannerOutput.InputTokens, plannerOutput.OutputTokens, "PLANNER_FAILED")
+		_ = o.repository.Fail(ctx, &run, StatusPlanningFailed, "PLANNER_FAILED", err.Error())
+		return err
+	}
+	if err := o.repository.FinishStep(
+		ctx, &plannerStep, plannerOutput.Value,
+		plannerOutput.InputTokens, plannerOutput.OutputTokens, "",
+	); err != nil {
+		return err
+	}
+	if err := o.repository.SavePlan(ctx, run.ID, plannerOutput.Value); err != nil {
+		return err
+	}
+	if err := o.repository.Transition(
+		ctx, &run, StatusInvestigating, "run.status_changed", nil,
+	); err != nil {
+		return err
+	}
+
+	investigatorStep, err := o.repository.StartStep(
+		ctx, run.ID, "INVESTIGATOR", o.investigator.ModelName(), map[string]any{
+			"message": run.UserMessage, "order_id": run.OrderID,
+			"plan": plannerOutput.Value,
+		},
+	)
+	if err != nil {
+		return err
+	}
+	investigatorOutput, err := o.investigator.Run(
+		ctx, run, investigatorStep, plannerOutput.Value,
+	)
+	if err != nil {
+		code := "INVESTIGATOR_FAILED"
+		status := StatusInvestigationFailed
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrToolDenied) {
+			code = "INVESTIGATION_INCONCLUSIVE"
+			status = StatusInconclusive
+		}
+		_ = o.repository.FinishStep(ctx, &investigatorStep, map[string]any{
+			"raw": investigatorOutput.Raw, "error": err.Error(),
+		}, investigatorOutput.InputTokens, investigatorOutput.OutputTokens, code)
+		_ = o.repository.Fail(ctx, &run, status, code, err.Error())
+		return err
+	}
+	if err := o.repository.FinishStep(
+		ctx, &investigatorStep, investigatorOutput.Value,
+		investigatorOutput.InputTokens, investigatorOutput.OutputTokens, "",
+	); err != nil {
+		return err
+	}
+	return o.repository.Complete(ctx, &run, investigatorOutput.Value)
+}
+
+// RunWorker 持续领取 CREATED 任务并执行调查。
+func (o *Orchestrator) RunWorker(ctx context.Context) error {
+	if !o.Ready() {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		run, found, err := o.repository.ClaimCreated(ctx)
+		if err != nil {
+			return err
+		}
+		if found {
+			if err := o.Process(ctx, run); err != nil {
+				o.logger.Error("process investigation", "run_id", run.ID, "error", err)
+			}
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+// CreateRun 验证输入并创建异步调查任务。
+func (o *Orchestrator) CreateRun(
+	ctx context.Context,
+	message string,
+	orderID string,
+	traceID string,
+) (Run, error) {
+	if !o.Ready() {
+		return Run{}, errors.New("agent model is not configured")
+	}
+	if message == "" || orderID == "" {
+		return Run{}, fmt.Errorf("message and order_id are required")
+	}
+	return o.repository.CreateRun(ctx, message, orderID, traceID)
+}

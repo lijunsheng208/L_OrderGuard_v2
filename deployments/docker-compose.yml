@@ -9,6 +9,11 @@ x-go-service: &go-service
     ORDER_SERVICE_URL: "http://order-service:8080"
     PAYMENT_SERVICE_URL: "http://payment-service:8080"
     INVENTORY_SERVICE_URL: "http://inventory-service:8080"
+    BUSINESS_MCP_URL: "http://business-mcp:8080/mcp"
+    OBSERVABILITY_MCP_URL: "http://observability-mcp:8080/mcp"
+    AGENT_API_KEY: "${AGENT_API_KEY:-}"
+    AGENT_BASE_URL: "${AGENT_BASE_URL:-}"
+    AGENT_MODEL: "${AGENT_MODEL:-}"
   depends_on:
     migrate:
       condition: service_completed_successfully
@@ -65,7 +70,7 @@ services:
       - /bin/sh
       - -ec
       - |
-        for file in /migrations/orders/*.sql /migrations/payments/*.sql /migrations/inventory/*.sql /migrations/observability/*.sql /migrations/mcp/*.sql; do
+        for file in /migrations/orders/*.sql /migrations/payments/*.sql /migrations/inventory/*.sql /migrations/observability/*.sql /migrations/mcp/*.sql /migrations/agent/*.sql; do
           psql -v ON_ERROR_STOP=1 -f "$$file"
         done
 
@@ -124,6 +129,22 @@ services:
       context: ..
       args: {TARGET: mcp/remediation}
     ports: ["8094:8080"]
+
+  agent-runtime:
+    <<: *go-service
+    build:
+      context: ..
+      args: {TARGET: services/agent-runtime}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      business-mcp:
+        condition: service_healthy
+      observability-mcp:
+        condition: service_healthy
+    ports: ["8090:8080"]
 
 volumes:
   postgres-data:

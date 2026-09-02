@@ -111,10 +111,20 @@ type ToolCallAudit struct {
 	RequestID  string
 	ServerName string
 	ToolName   string
+	Metadata   RequestMetadata
 	Arguments  map[string]any
 	Envelope   Envelope
 	Duration   time.Duration
 	CalledAt   time.Time
+}
+
+// RequestMetadata 保存 Runtime 传递给 MCP Server 的调用关联信息。
+type RequestMetadata struct {
+	RunID       string
+	AgentStepID string
+	TraceID     string
+	ToolCallID  string
+	Caller      string
 }
 
 // Auditor 定义 MCP 工具调用审计写入能力。

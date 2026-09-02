@@ -32,6 +32,31 @@ func InventoryServiceURL() string {
 	return value("INVENTORY_SERVICE_URL", "http://localhost:8083")
 }
 
+// BusinessMCPURL 返回 business-mcp 的调用端点。
+func BusinessMCPURL() string {
+	return value("BUSINESS_MCP_URL", "http://localhost:8091/mcp")
+}
+
+// ObservabilityMCPURL 返回 observability-mcp 的调用端点。
+func ObservabilityMCPURL() string {
+	return value("OBSERVABILITY_MCP_URL", "http://localhost:8092/mcp")
+}
+
+// AgentAPIKey 返回 Eino ChatModel 使用的 API Key。
+func AgentAPIKey() string {
+	return os.Getenv("AGENT_API_KEY")
+}
+
+// AgentBaseURL 返回 OpenAI-compatible 模型端点。
+func AgentBaseURL() string {
+	return os.Getenv("AGENT_BASE_URL")
+}
+
+// AgentModel 返回 Eino ChatModel 使用的模型名。
+func AgentModel() string {
+	return os.Getenv("AGENT_MODEL")
+}
+
 // value 读取环境变量，未设置时返回默认值。
 func value(key, fallback string) string {
 	if result := os.Getenv(key); result != "" {

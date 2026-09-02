@@ -36,12 +36,19 @@ func (a *PostgresAuditor) Record(ctx context.Context, record mcp.ToolCallAudit) 
 	_, err = a.db.Exec(ctx, `
 		INSERT INTO mcp.tool_calls (
 			request_id, server_name, tool_name, arguments, success,
-			evidence_id, source, result, error_code, duration_ms, called_at
-		) VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, $10, $11)`,
+			evidence_id, source, result, error_code, duration_ms, called_at,
+			run_id, agent_step_id, trace_id, tool_call_id, caller
+		) VALUES (
+			$1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, $10, $11,
+			NULLIF($12, ''), NULLIF($13, ''), NULLIF($14, ''),
+			NULLIF($15, ''), NULLIF($16, '')
+		)`,
 		record.RequestID, record.ServerName, record.ToolName, arguments,
 		record.Envelope.Success, record.Envelope.EvidenceID,
 		record.Envelope.Source, result, errorCode,
 		record.Duration.Milliseconds(), record.CalledAt,
+		record.Metadata.RunID, record.Metadata.AgentStepID, record.Metadata.TraceID,
+		record.Metadata.ToolCallID, record.Metadata.Caller,
 	)
 	if err != nil {
 		return fmt.Errorf("insert mcp tool audit: %w", err)

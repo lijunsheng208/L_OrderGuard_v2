@@ -141,6 +141,39 @@ func TestExecutionErrorAndAudit(t *testing.T) {
 	}
 }
 
+// TestAuditReceivesRuntimeMetadata 验证 Runtime Header 被传入 MCP 调用审计。
+func TestAuditReceivesRuntimeMetadata(t *testing.T) {
+	auditor := &memoryAuditor{}
+	server := NewServer(
+		Profiles()["business"], slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WithAuditor(auditor),
+		WithToolHandler("get_order_snapshot", func(
+			_ context.Context,
+			_ map[string]any,
+		) (ToolOutput, error) {
+			return ToolOutput{Data: map[string]any{"status": "PAID"}}, nil
+		}),
+	)
+	client := NewClient("http://mcp.local/mcp", &http.Client{
+		Transport: handlerTransport{handler: server.Handler()},
+	})
+	_, err := client.CallToolWithMetadata(
+		context.Background(), "get_order_snapshot", map[string]any{"order_id": "O1001"},
+		RequestMetadata{
+			RunID: "run-1", AgentStepID: "step-1", TraceID: "trace-1",
+			ToolCallID: "call-1", Caller: "investigator-agent",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := auditor.snapshot()
+	if len(records) != 1 || records[0].Metadata.ToolCallID != "call-1" ||
+		records[0].Metadata.RunID != "run-1" {
+		t.Fatalf("unexpected audit metadata: %+v", records)
+	}
+}
+
 // callTestTool 在内存 HTTP Server 上调用一个订单参数工具。
 func callTestTool(t *testing.T, server *Server, toolName string) ToolCallResult {
 	t.Helper()

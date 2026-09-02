@@ -1,6 +1,6 @@
 # OrderGuard
 
-当前实现范围包括 `ORDERGUARD_MCP_AGENT_PLAN.md` 的阶段 0 至阶段 2：MCP 契约和 Server 骨架、订单正常交付链路，以及可审计的只读业务与可观测性证据采集。
+当前实现范围包括 `ORDERGUARD_MCP_AGENT_PLAN.md` 的阶段 0 至阶段 3：MCP 契约和 Server 骨架、订单正常交付链路、可审计的只读证据采集，以及基于 Eino 的 Planner/Investigator Agent Runtime。
 
 ## 本地验证
 
@@ -58,6 +58,28 @@ go run ./cmd/mcp/client -endpoint http://localhost:8091/mcp -order-id O1001
 make integration-test
 ```
 
+阶段 3 使用 Eino `v0.9.18`。Planner 生成结构化调查计划，Investigator 使用 Eino ReAct Agent 动态调用只读 MCP 工具。模型通过 OpenAI-compatible Eino 组件配置：
+
+```bash
+export AGENT_API_KEY=your-key
+export AGENT_BASE_URL=https://your-compatible-endpoint/v1
+export AGENT_MODEL=your-model
+docker compose -f deployments/docker-compose.yml up --build -d
+```
+
+未配置模型时 `agent-runtime` 仍能启动并返回健康状态，但创建调查会返回 `MODEL_NOT_CONFIGURED`。创建调查并订阅进度：
+
+```bash
+curl -X POST http://localhost:8090/api/v1/investigations \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"调查订单 O1001 的支付和库存链路","order_id":"O1001"}'
+
+curl -N http://localhost:8090/api/v1/investigations/{run_id}/events
+curl http://localhost:8090/api/v1/investigations/{run_id}/evidence
+```
+
+集成测试中的阶段 3 验收使用脚本化 Eino `ToolCallingChatModel`，不访问任何外部模型，但会真实执行 ReAct 循环和至少 4 次 MCP 调用。
+
 停止容器：
 
 ```bash
@@ -66,4 +88,4 @@ docker compose -f deployments/docker-compose.yml down
 
 宿主机端口：业务服务使用 `8081` 至 `8084`，MCP Server 使用 `8091` 至 `8094`，PostgreSQL 使用 `55432`，Redis 使用 `56379`。每个服务都暴露 `GET /healthz`。
 
-阶段 2 尚不实现知识检索、Agent Runtime、不可变证据仓库、诊断、审查或修复逻辑。
+阶段 3 尚不实现 Knowledge Agent、Diagnosis Agent、Critic Agent、策略审批或修复逻辑。
