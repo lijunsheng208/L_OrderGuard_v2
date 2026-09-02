@@ -1,0 +1,22 @@
+{
+  "contract_version": "0.1.0",
+  "protocol_errors": {
+    "-32700": "无法解析 JSON",
+    "-32600": "JSON-RPC 请求无效",
+    "-32601": "MCP 方法不存在",
+    "-32602": "工具名或工具参数无效",
+    "-32603": "MCP Server 内部错误"
+  },
+  "tool_errors": {
+    "INVALID_ARGUMENT": {"retryable": false},
+    "NOT_FOUND": {"retryable": false},
+    "UPSTREAM_UNAVAILABLE": {"retryable": true},
+    "UPSTREAM_TIMEOUT": {"retryable": true},
+    "PERMISSION_DENIED": {"retryable": false},
+    "POLICY_REJECTED": {"retryable": false},
+    "CONFLICT": {"retryable": false},
+    "PHASE_NOT_IMPLEMENTED": {"retryable": false},
+    "INTERNAL": {"retryable": true}
+  }
+}
+
