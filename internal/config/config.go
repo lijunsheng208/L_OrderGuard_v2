@@ -45,6 +45,9 @@ func ObservabilityMCPURL() string {
 // KnowledgeMCPURL 返回 knowledge-mcp 的调用端点。
 func KnowledgeMCPURL() string { return value("KNOWLEDGE_MCP_URL", "http://localhost:8093/mcp") }
 
+// RemediationMCPURL 返回 remediation-mcp 的调用端点。
+func RemediationMCPURL() string { return value("REMEDIATION_MCP_URL", "http://localhost:8094/mcp") }
+
 // AgentAPIKey 返回 Eino ChatModel 使用的 API Key。
 func AgentAPIKey() string {
 	return os.Getenv("AGENT_API_KEY")

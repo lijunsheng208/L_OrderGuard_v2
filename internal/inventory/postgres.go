@@ -24,6 +24,60 @@ type Repository struct {
 	db *pgxpool.Pool
 }
 
+// DeductOnce 在事务中二次确认订单和支付状态，并执行幂等库存扣减。
+func (r *Repository) DeductOnce(ctx context.Context, orderID string, items []Item, key string) ([]Deduction, error) {
+	if orderID == "" || key == "" || len(items) == 0 {
+		return nil, errors.New("invalid deduction request")
+	}
+	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	var orderStatus, paymentStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM orders.orders WHERE id=$1 FOR UPDATE`, orderID).Scan(&orderStatus); errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrOrderNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	if err := tx.QueryRow(ctx, `SELECT status FROM payments.payments WHERE order_id=$1`, orderID).Scan(&paymentStatus); err != nil || paymentStatus != "SUCCESS" || orderStatus != "PAID" {
+		return nil, errors.New("payment or order state is not repairable")
+	}
+	var count int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM inventory.deductions WHERE order_id=$1 AND status='DEDUCTED'`, orderID).Scan(&count); err != nil {
+		return nil, err
+	}
+	if count > 0 {
+		return getDeductions(ctx, tx, orderID)
+	}
+	result := make([]Deduction, 0, len(items))
+	for _, item := range items {
+		var available int
+		if item.SKUID == "" || item.Quantity <= 0 {
+			return nil, errors.New("invalid inventory item")
+		}
+		if err := tx.QueryRow(ctx, `SELECT available FROM inventory.stocks WHERE sku_id=$1 FOR UPDATE`, item.SKUID).Scan(&available); err != nil {
+			return nil, err
+		}
+		if available < item.Quantity {
+			return nil, ErrInsufficientStock
+		}
+		_, err = tx.Exec(ctx, `UPDATE inventory.stocks SET available=available-$1, version=version+1, updated_at=now() WHERE sku_id=$2`, item.Quantity, item.SKUID)
+		if err != nil {
+			return nil, err
+		}
+		d := Deduction{OrderID: orderID, SKUID: item.SKUID, Quantity: item.Quantity, IdempotencyKey: key + ":" + item.SKUID, Status: Deducted, CreatedAt: time.Now().UTC()}
+		if _, err = tx.Exec(ctx, `INSERT INTO inventory.deductions(order_id,sku_id,quantity,idempotency_key,status,created_at) VALUES($1,$2,$3,$4,'DEDUCTED',$5)`, d.OrderID, d.SKUID, d.Quantity, d.IdempotencyKey, d.CreatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, d)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // NewRepository 创建库存 Repository。
 func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db}

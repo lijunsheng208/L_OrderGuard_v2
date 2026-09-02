@@ -242,3 +242,34 @@ func contains(value, needle string) bool {
 	}
 	return false
 }
+
+// RunVerifyAgent 使用 Eino Verify Agent 审查修复后的状态断言。
+func (o *Orchestrator) RunVerifyAgent(ctx context.Context, run Run, facts map[string]any) error {
+	if o.phase4Model == nil {
+		return errors.New("verify agent model is not configured")
+	}
+	input, _ := json.Marshal(map[string]any{"order_id": run.OrderID, "facts": facts, "required_assertions": []string{"inventory.status == DEDUCTED", "successful_deduction_count == 1"}})
+	response, err := o.phase4Model.Generate(ctx, []*schema.Message{schema.SystemMessage(VerifyPrompt), schema.UserMessage(string(input))})
+	if err != nil {
+		return fmt.Errorf("verify agent: %w", err)
+	}
+	var result struct {
+		Approved   bool `json:"approved"`
+		Assertions []struct {
+			Name   string `json:"name"`
+			Passed bool   `json:"passed"`
+		} `json:"assertions"`
+	}
+	if err := decodeModelJSON(response.Content, &result); err != nil {
+		return fmt.Errorf("decode verify result: %w", err)
+	}
+	if !result.Approved || len(result.Assertions) == 0 {
+		return errors.New("verify agent rejected repair")
+	}
+	for _, assertion := range result.Assertions {
+		if !assertion.Passed {
+			return fmt.Errorf("verification assertion failed: %s", assertion.Name)
+		}
+	}
+	return nil
+}

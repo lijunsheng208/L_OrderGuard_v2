@@ -1,6 +1,7 @@
 package inventory
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -21,7 +22,34 @@ func NewHandler(repository *Repository) http.Handler {
 	mux.HandleFunc("GET /inventory/{id}/deductions", handler.getDeductions)
 	mux.HandleFunc("GET /inventory/{id}/status", handler.getStatus)
 	mux.HandleFunc("GET /stocks/{id}", handler.getStock)
+	mux.HandleFunc("POST /inventory/{id}/deduct-once", handler.deductOnce)
 	return tracing.Middleware(mux)
+}
+
+// deductOnce 在二次读取业务状态后执行幂等库存扣减。
+func (h *Handler) deductOnce(w http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Items          []Item `json:"items"`
+		IdempotencyKey string `json:"idempotency_key"`
+	}
+	if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_JSON", "invalid deduction request")
+		return
+	}
+	result, err := h.repository.DeductOnce(request.Context(), request.PathValue("id"), input.Items, input.IdempotencyKey)
+	if errors.Is(err, ErrOrderNotFound) {
+		httpx.WriteError(w, http.StatusNotFound, "ORDER_NOT_FOUND", err.Error())
+		return
+	}
+	if errors.Is(err, ErrInsufficientStock) {
+		httpx.WriteError(w, http.StatusConflict, "INSUFFICIENT_STOCK", err.Error())
+		return
+	}
+	if err != nil {
+		httpx.WriteError(w, http.StatusConflict, "DEDUCTION_REJECTED", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"order_id": request.PathValue("id"), "deductions": result})
 }
 
 // getStatus 返回订单维度的库存处理状态。

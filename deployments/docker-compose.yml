@@ -12,6 +12,7 @@ x-go-service: &go-service
     BUSINESS_MCP_URL: "http://business-mcp:8080/mcp"
     OBSERVABILITY_MCP_URL: "http://observability-mcp:8080/mcp"
     KNOWLEDGE_MCP_URL: "http://knowledge-mcp:8080/mcp"
+    REMEDIATION_MCP_URL: "http://remediation-mcp:8080/mcp"
     AGENT_API_KEY: "${AGENT_API_KEY:-}"
     AGENT_BASE_URL: "${AGENT_BASE_URL:-}"
     AGENT_MODEL: "${AGENT_MODEL:-}"

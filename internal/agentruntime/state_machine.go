@@ -14,9 +14,14 @@ var transitions = map[Status]map[Status]bool{
 		StatusKnowledgeLookup: true, StatusEvidenceCollected: true, StatusInvestigationFailed: true,
 		StatusInconclusive: true, StatusCancelled: true,
 	},
-	StatusKnowledgeLookup: {StatusDiagnosing: true, StatusInconclusive: true, StatusCancelled: true},
-	StatusDiagnosing:      {StatusCriticReview: true, StatusInconclusive: true, StatusCancelled: true},
-	StatusCriticReview:    {StatusEvidenceCollected: true, StatusNoAnomaly: true, StatusInconclusive: true, StatusCancelled: true},
+	StatusKnowledgeLookup:   {StatusDiagnosing: true, StatusInconclusive: true, StatusCancelled: true},
+	StatusDiagnosing:        {StatusCriticReview: true, StatusInconclusive: true, StatusCancelled: true},
+	StatusCriticReview:      {StatusEvidenceCollected: true, StatusNoAnomaly: true, StatusInconclusive: true, StatusCancelled: true},
+	StatusEvidenceCollected: {StatusPolicyCheck: true},
+	StatusPolicyCheck:       {StatusAwaitingApproval: true, StatusRejected: true, StatusInconclusive: true},
+	StatusAwaitingApproval:  {StatusExecuting: true, StatusRejected: true, StatusCancelled: true},
+	StatusExecuting:         {StatusVerifying: true, StatusExecutionFailed: true},
+	StatusVerifying:         {StatusRepaired: true, StatusVerificationFailed: true},
 }
 
 // ValidateTransition 校验阶段 3 工作流状态迁移。

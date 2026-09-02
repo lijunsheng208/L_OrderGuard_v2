@@ -23,6 +23,52 @@ type Repository struct {
 	db *pgxpool.Pool
 }
 
+// CreateRepairPlan 保存一次待执行的修复方案。
+func (r *Repository) CreateRepairPlan(ctx context.Context, runID, action string, evidenceVersion int64, payload any) (string, error) {
+	id := newID("repair-plan")
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	_, err = r.db.Exec(ctx, `INSERT INTO agent.repair_plans (id,run_id,action,policy_version,evidence_version,payload) VALUES ($1,$2,$3,$4,$5,$6)`, id, runID, action, "phase5-v1", evidenceVersion, data)
+	return id, err
+}
+
+// StartRepairExecution 保存修复开始记录。
+func (r *Repository) StartRepairExecution(ctx context.Context, planID, runID, key string, request any) (string, error) {
+	id := newID("repair-exec")
+	data, err := json.Marshal(request)
+	if err != nil {
+		return "", err
+	}
+	_, err = r.db.Exec(ctx, `INSERT INTO agent.repair_executions (id,repair_plan_id,run_id,idempotency_key,status,request) VALUES ($1,$2,$3,$4,'STARTED',$5)`, id, planID, runID, key, data)
+	return id, err
+}
+
+// FinishRepairExecution 更新修复执行结果。
+func (r *Repository) FinishRepairExecution(ctx context.Context, id, status, errorCode string, result any) error {
+	data, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Exec(ctx, `UPDATE agent.repair_executions SET status=$2,result=$3,error_code=NULLIF($4,''),completed_at=now() WHERE id=$1`, id, status, data, errorCode)
+	return err
+}
+
+// SaveVerificationResult 保存 Verify Agent 的断言结果。
+func (r *Repository) SaveVerificationResult(ctx context.Context, runID, executionID, status string, assertions any, evidenceIDs any, summary string) error {
+	a, err := json.Marshal(assertions)
+	if err != nil {
+		return err
+	}
+	e, err := json.Marshal(evidenceIDs)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Exec(ctx, `INSERT INTO agent.verification_results (id,run_id,repair_execution_id,status,assertions,evidence_ids,summary) VALUES ($1,$2,$3,$4,$5,$6,$7)`, newID("verification"), runID, executionID, status, a, e, summary)
+	return err
+}
+
 // NewRepository 创建 Agent Runtime Repository。
 func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db}

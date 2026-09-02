@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS agent.investigation_runs (
     user_message TEXT NOT NULL,
     order_id TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN (
-        'CREATED', 'PLANNING', 'INVESTIGATING', 'KNOWLEDGE_LOOKUP', 'DIAGNOSING', 'CRITIC_REVIEW', 'EVIDENCE_COLLECTED', 'NO_ANOMALY',
+        'CREATED', 'PLANNING', 'INVESTIGATING', 'KNOWLEDGE_LOOKUP', 'DIAGNOSING', 'CRITIC_REVIEW', 'EVIDENCE_COLLECTED', 'NO_ANOMALY', 'POLICY_CHECK', 'AWAITING_APPROVAL', 'EXECUTING', 'VERIFYING', 'REPAIRED', 'REJECTED', 'EXECUTION_FAILED', 'VERIFICATION_FAILED',
         'PLANNING_FAILED', 'INVESTIGATION_FAILED', 'INCONCLUSIVE', 'CANCELLED'
     )),
     trace_id TEXT NOT NULL,
@@ -56,6 +56,44 @@ CREATE TABLE IF NOT EXISTS agent.evidence_snapshots (
 CREATE INDEX IF NOT EXISTS evidence_snapshots_run_idx
     ON agent.evidence_snapshots (run_id, created_at);
 
+CREATE TABLE IF NOT EXISTS agent.repair_plans (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES agent.investigation_runs(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    evidence_version BIGINT NOT NULL,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS agent.repair_executions (
+    id TEXT PRIMARY KEY,
+    repair_plan_id TEXT NOT NULL REFERENCES agent.repair_plans(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL REFERENCES agent.investigation_runs(id) ON DELETE CASCADE,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('STARTED', 'SUCCEEDED', 'FAILED')),
+    request JSONB NOT NULL,
+    result JSONB,
+    error_code TEXT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS agent.verification_results (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES agent.investigation_runs(id) ON DELETE CASCADE,
+    repair_execution_id TEXT REFERENCES agent.repair_executions(id) ON DELETE SET NULL,
+    status TEXT NOT NULL CHECK (status IN ('PASSED', 'FAILED')),
+    assertions JSONB NOT NULL,
+    evidence_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    summary TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS repair_plans_run_idx ON agent.repair_plans (run_id, created_at);
+CREATE INDEX IF NOT EXISTS repair_executions_run_idx ON agent.repair_executions (run_id, started_at);
+CREATE INDEX IF NOT EXISTS verification_results_run_idx ON agent.verification_results (run_id, created_at);
+
 CREATE TABLE IF NOT EXISTS agent.investigation_events (
     id BIGSERIAL PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES agent.investigation_runs(id) ON DELETE CASCADE,
@@ -93,7 +131,7 @@ DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'investigation_runs_status_check') THEN
         ALTER TABLE agent.investigation_runs ADD CONSTRAINT investigation_runs_status_check CHECK (status IN (
             'CREATED', 'PLANNING', 'INVESTIGATING', 'KNOWLEDGE_LOOKUP', 'DIAGNOSING', 'CRITIC_REVIEW',
-            'EVIDENCE_COLLECTED', 'NO_ANOMALY', 'PLANNING_FAILED', 'INVESTIGATION_FAILED', 'INCONCLUSIVE', 'CANCELLED'
+            'EVIDENCE_COLLECTED', 'NO_ANOMALY', 'POLICY_CHECK', 'AWAITING_APPROVAL', 'EXECUTING', 'VERIFYING', 'REPAIRED', 'REJECTED', 'EXECUTION_FAILED', 'VERIFICATION_FAILED', 'PLANNING_FAILED', 'INVESTIGATION_FAILED', 'INCONCLUSIVE', 'CANCELLED'
         ));
     END IF;
 END $$;

@@ -36,3 +36,8 @@ const CriticPrompt = `你是 OrderGuard Critic Agent。
 {"approved":true,"issues":["..."],"missing_tools":["..."]}
 
 未知 evidence_id、未知根因枚举或证据不足时，approved 必须为 false。`
+
+// VerifyPrompt 是 Verify Agent 的多行系统提示词。
+const VerifyPrompt = `你是 OrderGuard Verify Agent。
+根据修复后重新读取的业务状态，逐项检查验证断言。只输出 JSON：{"approved":true,"assertions":[{"name":"...","passed":true}],"summary":"..."}。
+不得臆测未提供的状态；任一断言未通过时 approved 必须为 false。`

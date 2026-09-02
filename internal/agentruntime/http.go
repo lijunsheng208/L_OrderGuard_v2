@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lijunsheng/orderguard/internal/config"
 	"github.com/lijunsheng/orderguard/internal/httpx"
+	"github.com/lijunsheng/orderguard/internal/mcp"
 	"github.com/lijunsheng/orderguard/internal/tracing"
 )
 
@@ -29,7 +31,114 @@ func NewHandler(repository *Repository, orchestrator *Orchestrator) http.Handler
 	mux.HandleFunc("GET /api/v1/investigations/{id}/steps", handler.getSteps)
 	mux.HandleFunc("GET /api/v1/investigations/{id}/evidence", handler.getEvidence)
 	mux.HandleFunc("GET /api/v1/investigations/{id}/events", handler.streamEvents)
+	mux.HandleFunc("POST /api/v1/investigations/{id}/approve", handler.approveRun)
+	mux.HandleFunc("POST /api/v1/investigations/{id}/execute", handler.executeRun)
 	return tracing.Middleware(mux)
+}
+
+// executeRun 在无需人工审批的模式下执行幂等修复并验证结果。
+func (h *Handler) executeRun(w http.ResponseWriter, request *http.Request) {
+	run, err := h.repository.GetRun(request.Context(), request.PathValue("id"))
+	if errors.Is(err, ErrRunNotFound) {
+		httpx.WriteError(w, 404, "RUN_NOT_FOUND", err.Error())
+		return
+	}
+	if err != nil {
+		httpx.WriteError(w, 500, "QUERY_RUN_FAILED", err.Error())
+		return
+	}
+	if run.Status != StatusAwaitingApproval {
+		httpx.WriteError(w, 409, "EXECUTION_REJECTED", "investigation is not awaiting approval")
+		return
+	}
+	var input struct {
+		Items          []map[string]any `json:"items"`
+		IdempotencyKey string           `json:"idempotency_key"`
+	}
+	if err := json.NewDecoder(request.Body).Decode(&input); err != nil || len(input.Items) == 0 || input.IdempotencyKey == "" {
+		httpx.WriteError(w, 400, "INVALID_EXECUTION", "items and idempotency_key are required")
+		return
+	}
+	if err := h.repository.Transition(request.Context(), &run, StatusExecuting, "repair.started", nil); err != nil {
+		httpx.WriteError(w, 409, "EXECUTION_REJECTED", err.Error())
+		return
+	}
+	planID, err := h.repository.CreateRepairPlan(request.Context(), run.ID, "DEDUCT_INVENTORY_ONCE", run.Version, map[string]any{"items": input.Items, "idempotency_key": input.IdempotencyKey})
+	if err != nil {
+		httpx.WriteError(w, 500, "REPAIR_PLAN_FAILED", err.Error())
+		return
+	}
+	executionID, err := h.repository.StartRepairExecution(request.Context(), planID, run.ID, input.IdempotencyKey, input)
+	if err != nil {
+		httpx.WriteError(w, 500, "REPAIR_EXECUTION_RECORD_FAILED", err.Error())
+		return
+	}
+	client := mcp.NewClient(config.RemediationMCPURL(), &http.Client{Timeout: 5 * time.Second})
+	callErr := client.Initialize(request.Context())
+	var repairResult mcp.ToolCallResult
+	if callErr == nil {
+		repairResult, callErr = client.CallToolWithMetadata(request.Context(), "deduct_inventory_once", map[string]any{"order_id": run.OrderID, "items": input.Items, "idempotency_key": input.IdempotencyKey, "evidence_version": fmt.Sprint(run.Version)}, mcp.RequestMetadata{RunID: run.ID, TraceID: run.TraceID, Caller: "runtime-policy"})
+	}
+	if callErr != nil || !repairResult.StructuredContent.Success {
+		_ = h.repository.FinishRepairExecution(request.Context(), executionID, "FAILED", "EXECUTION_FAILED", map[string]any{"error": fmt.Sprint(callErr)})
+		_ = h.repository.Fail(request.Context(), &run, StatusExecutionFailed, "EXECUTION_FAILED", "inventory repair failed")
+		httpx.WriteError(w, 502, "EXECUTION_FAILED", "inventory repair failed")
+		return
+	}
+	_ = h.repository.FinishRepairExecution(request.Context(), executionID, "SUCCEEDED", "", repairResult.StructuredContent)
+	_ = h.repository.Transition(request.Context(), &run, StatusVerifying, "verification.started", nil)
+	verifyReq, _ := http.NewRequestWithContext(request.Context(), http.MethodGet, strings.TrimRight(config.InventoryServiceURL(), "/")+"/inventory/"+run.OrderID+"/status", nil)
+	verifyResp, verifyErr := (&http.Client{}).Do(verifyReq)
+	if verifyErr != nil || verifyResp.StatusCode >= 300 {
+		if verifyResp != nil {
+			verifyResp.Body.Close()
+		}
+		_ = h.repository.Fail(request.Context(), &run, StatusVerificationFailed, "VERIFICATION_FAILED", "inventory verification failed")
+		httpx.WriteError(w, 502, "VERIFICATION_FAILED", "inventory verification failed")
+		return
+	}
+	var status struct {
+		Status     string `json:"status"`
+		Successful int    `json:"successful_deduction_count"`
+	}
+	_ = json.NewDecoder(verifyResp.Body).Decode(&status)
+	verifyResp.Body.Close()
+	facts := map[string]any{"inventory_status": status.Status, "successful_deduction_count": status.Successful}
+	if status.Status != "DEDUCTED" || status.Successful != 1 || h.orchestrator == nil || h.orchestrator.RunVerifyAgent(request.Context(), run, facts) != nil {
+		_ = h.repository.SaveVerificationResult(request.Context(), run.ID, executionID, "FAILED", facts, nil, "verification assertions failed")
+		_ = h.repository.Fail(request.Context(), &run, StatusVerificationFailed, "VERIFICATION_FAILED", "verification assertions failed")
+		httpx.WriteError(w, 409, "VERIFICATION_FAILED", "verification assertions failed")
+		return
+	}
+	_ = h.repository.SaveVerificationResult(request.Context(), run.ID, executionID, "PASSED", facts, nil, "repair verified")
+	_ = h.repository.Transition(request.Context(), &run, StatusRepaired, "run.repaired", map[string]any{"successful_deduction_count": status.Successful})
+	httpx.WriteJSON(w, http.StatusOK, run)
+}
+
+// approveRun 将通过策略检查的调查任务置为等待执行审批。
+func (h *Handler) approveRun(w http.ResponseWriter, request *http.Request) {
+	run, err := h.repository.GetRun(request.Context(), request.PathValue("id"))
+	if errors.Is(err, ErrRunNotFound) {
+		httpx.WriteError(w, http.StatusNotFound, "RUN_NOT_FOUND", err.Error())
+		return
+	}
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "QUERY_RUN_FAILED", err.Error())
+		return
+	}
+	if run.Status != StatusEvidenceCollected {
+		httpx.WriteError(w, http.StatusConflict, "POLICY_REJECTED", "investigation is not ready for approval")
+		return
+	}
+	if err := h.repository.Transition(request.Context(), &run, StatusPolicyCheck, "policy.checked", map[string]any{"approved": true}); err != nil {
+		httpx.WriteError(w, http.StatusConflict, "POLICY_REJECTED", err.Error())
+		return
+	}
+	if err := h.repository.Transition(request.Context(), &run, StatusAwaitingApproval, "approval.requested", nil); err != nil {
+		httpx.WriteError(w, http.StatusConflict, "APPROVAL_FAILED", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, run)
 }
 
 // health 返回 Runtime 存活状态和模型配置状态。
