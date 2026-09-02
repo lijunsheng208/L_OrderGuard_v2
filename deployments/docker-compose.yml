@@ -11,6 +11,7 @@ x-go-service: &go-service
     INVENTORY_SERVICE_URL: "http://inventory-service:8080"
     BUSINESS_MCP_URL: "http://business-mcp:8080/mcp"
     OBSERVABILITY_MCP_URL: "http://observability-mcp:8080/mcp"
+    KNOWLEDGE_MCP_URL: "http://knowledge-mcp:8080/mcp"
     AGENT_API_KEY: "${AGENT_API_KEY:-}"
     AGENT_BASE_URL: "${AGENT_BASE_URL:-}"
     AGENT_MODEL: "${AGENT_MODEL:-}"
@@ -143,6 +144,8 @@ services:
       business-mcp:
         condition: service_healthy
       observability-mcp:
+        condition: service_healthy
+      knowledge-mcp:
         condition: service_healthy
     ports: ["8090:8080"]
 

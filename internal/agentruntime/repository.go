@@ -143,6 +143,11 @@ func (r *Repository) SavePlan(ctx context.Context, runID string, plan Plan) erro
 
 // Complete 保存 Investigator 输出并将任务推进到证据已收集状态。
 func (r *Repository) Complete(ctx context.Context, run *Run, result InvestigationResult) error {
+	return r.CompleteStatus(ctx, run, result, StatusEvidenceCollected)
+}
+
+// CompleteStatus 保存最终结果并推进到指定终态。
+func (r *Repository) CompleteStatus(ctx context.Context, run *Run, result InvestigationResult, target Status) error {
 	encoded, err := json.Marshal(result)
 	if err != nil {
 		return fmt.Errorf("encode investigation result: %w", err)
@@ -157,7 +162,7 @@ func (r *Repository) Complete(ctx context.Context, run *Run, result Investigatio
 		SET status = $4, version = version + 1, final_summary = $5,
 			updated_at = now(), completed_at = now()
 		WHERE id = $1 AND status = $2 AND version = $3`,
-		run.ID, run.Status, run.Version, StatusEvidenceCollected, encoded,
+		run.ID, run.Status, run.Version, target, encoded,
 	)
 	if err != nil {
 		return fmt.Errorf("complete investigation: %w", err)
@@ -166,14 +171,14 @@ func (r *Repository) Complete(ctx context.Context, run *Run, result Investigatio
 		return ErrConflict
 	}
 	if _, err := appendEventTx(ctx, tx, run.ID, "run.completed", map[string]any{
-		"status": StatusEvidenceCollected, "summary": result.Summary,
+		"status": target, "summary": result.Summary,
 	}); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit complete investigation: %w", err)
 	}
-	run.Status = StatusEvidenceCollected
+	run.Status = target
 	run.Version++
 	run.FinalSummary = encoded
 	return nil

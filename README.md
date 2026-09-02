@@ -88,4 +88,4 @@ docker compose -f deployments/docker-compose.yml down
 
 宿主机端口：业务服务使用 `8081` 至 `8084`，MCP Server 使用 `8091` 至 `8094`，PostgreSQL 使用 `55432`，Redis 使用 `56379`。每个服务都暴露 `GET /healthz`。
 
-阶段 3 尚不实现 Knowledge Agent、Diagnosis Agent、Critic Agent、策略审批或修复逻辑。
+阶段 4 已实现本地 Markdown 知识库、knowledge-mcp、知识检索、受限根因诊断和 Critic 证据校验。知识文件位于 `internal/knowledge/files/`，按 Markdown 标题切分；阶段 4 仍不会执行任何写修复操作。

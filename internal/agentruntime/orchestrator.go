@@ -4,17 +4,34 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/cloudwego/eino/components/model"
 	"log/slog"
 	"time"
 )
 
 // Orchestrator 按阶段 3 状态机编排 Planner 和 Investigator。
 type Orchestrator struct {
-	repository   *Repository
-	planner      *Planner
-	investigator *Investigator
-	logger       *slog.Logger
-	runTimeout   time.Duration
+	repository      *Repository
+	planner         *Planner
+	investigator    *Investigator
+	knowledge       *MCPRegistry
+	phase4Model     model.BaseChatModel
+	phase4ModelName string
+	logger          *slog.Logger
+	runTimeout      time.Duration
+}
+
+// NewOrchestratorWithPhase4 创建包含本地知识检索和诊断审查的编排器。
+func NewOrchestratorWithPhase4(repository *Repository, planner *Planner, investigator *Investigator, knowledge *MCPRegistry, logger *slog.Logger, models ...model.BaseChatModel) *Orchestrator {
+	o := NewOrchestrator(repository, planner, investigator, logger)
+	o.knowledge = knowledge
+	if len(models) > 0 {
+		o.phase4Model = models[0]
+	}
+	if investigator != nil {
+		o.phase4ModelName = investigator.ModelName()
+	}
+	return o
 }
 
 // NewOrchestrator 创建阶段 3 Agent 编排器。
@@ -104,6 +121,48 @@ func (o *Orchestrator) Process(parent context.Context, run Run) error {
 		investigatorOutput.InputTokens, investigatorOutput.OutputTokens, "",
 	); err != nil {
 		return err
+	}
+	if o.knowledge != nil {
+		if err := o.repository.Transition(ctx, &run, StatusKnowledgeLookup, "run.status_changed", nil); err != nil {
+			return err
+		}
+		if err := o.CollectKnowledge(ctx, &run); err != nil {
+			_ = o.repository.Fail(ctx, &run, StatusInconclusive, "KNOWLEDGE_FAILED", err.Error())
+			return err
+		}
+		if err := o.repository.Transition(ctx, &run, StatusDiagnosing, "run.status_changed", nil); err != nil {
+			return err
+		}
+		diagnosisStep, err := o.repository.StartStep(ctx, run.ID, "DIAGNOSIS", "deterministic-phase4", map[string]any{"order_id": run.OrderID})
+		if err != nil {
+			return err
+		}
+		diagnosis, err := o.RunDiagnosisAgent(ctx, run)
+		if err != nil {
+			_ = o.repository.FinishStep(ctx, &diagnosisStep, map[string]any{"error": err.Error()}, 0, 0, "DIAGNOSIS_INCONCLUSIVE")
+			_ = o.repository.Fail(ctx, &run, StatusInconclusive, "DIAGNOSIS_INCONCLUSIVE", err.Error())
+			return err
+		}
+		if err := o.repository.FinishStep(ctx, &diagnosisStep, diagnosis, 0, 0, ""); err != nil {
+			return err
+		}
+		if err := o.repository.Transition(ctx, &run, StatusCriticReview, "run.status_changed", map[string]any{"root_cause": diagnosis.RootCause}); err != nil {
+			return err
+		}
+		criticStep, err := o.repository.StartStep(ctx, run.ID, "CRITIC", "deterministic-phase4", diagnosis)
+		if err != nil {
+			return err
+		}
+		if err := o.RunCriticAgent(ctx, run, diagnosis); err != nil {
+			_ = o.repository.FinishStep(ctx, &criticStep, map[string]any{"error": err.Error()}, 0, 0, "CRITIC_REJECTED")
+			_ = o.repository.Fail(ctx, &run, StatusInconclusive, "CRITIC_REJECTED", err.Error())
+			return err
+		}
+		if err := o.repository.FinishStep(ctx, &criticStep, map[string]any{"approved": true}, 0, 0, ""); err != nil {
+			return err
+		}
+		investigatorOutput.Value.Diagnosis = &diagnosis
+		return o.repository.Complete(ctx, &run, investigatorOutput.Value)
 	}
 	return o.repository.Complete(ctx, &run, investigatorOutput.Value)
 }

@@ -12,7 +12,11 @@ const (
 	StatusCreated             Status = "CREATED"
 	StatusPlanning            Status = "PLANNING"
 	StatusInvestigating       Status = "INVESTIGATING"
+	StatusKnowledgeLookup     Status = "KNOWLEDGE_LOOKUP"
+	StatusDiagnosing          Status = "DIAGNOSING"
+	StatusCriticReview        Status = "CRITIC_REVIEW"
 	StatusEvidenceCollected   Status = "EVIDENCE_COLLECTED"
+	StatusNoAnomaly           Status = "NO_ANOMALY"
 	StatusPlanningFailed      Status = "PLANNING_FAILED"
 	StatusInvestigationFailed Status = "INVESTIGATION_FAILED"
 	StatusInconclusive        Status = "INCONCLUSIVE"
@@ -92,9 +96,25 @@ type PlanStep struct {
 
 // InvestigationResult 是 Investigator 的阶段 3 最终输出。
 type InvestigationResult struct {
-	Summary            string   `json:"summary"`
-	Facts              []Fact   `json:"facts"`
-	RemainingQuestions []string `json:"remaining_questions"`
+	Summary            string     `json:"summary"`
+	Facts              []Fact     `json:"facts"`
+	RemainingQuestions []string   `json:"remaining_questions"`
+	Diagnosis          *Diagnosis `json:"diagnosis,omitempty"`
+}
+
+// Diagnosis 是阶段 4 的带证据根因结论。
+type Diagnosis struct {
+	RootCause         string             `json:"root_cause"`
+	Confidence        float64            `json:"confidence"`
+	EvidenceIDs       []string           `json:"evidence_ids"`
+	Alternatives      []AlternativeCause `json:"alternatives,omitempty"`
+	RecommendedAction string             `json:"recommended_action,omitempty"`
+}
+
+// AlternativeCause 是未确认的替代原因。
+type AlternativeCause struct {
+	Cause      string  `json:"cause"`
+	Confidence float64 `json:"confidence"`
 }
 
 // Fact 表示引用不可变证据的调查事实。

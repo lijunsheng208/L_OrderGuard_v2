@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS agent.investigation_runs (
     user_message TEXT NOT NULL,
     order_id TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN (
-        'CREATED', 'PLANNING', 'INVESTIGATING', 'EVIDENCE_COLLECTED',
+        'CREATED', 'PLANNING', 'INVESTIGATING', 'KNOWLEDGE_LOOKUP', 'DIAGNOSING', 'CRITIC_REVIEW', 'EVIDENCE_COLLECTED', 'NO_ANOMALY',
         'PLANNING_FAILED', 'INVESTIGATION_FAILED', 'INCONCLUSIVE', 'CANCELLED'
     )),
     trace_id TEXT NOT NULL,
@@ -80,3 +80,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS tool_calls_tool_call_id_idx
 CREATE INDEX IF NOT EXISTS tool_calls_run_idx
     ON mcp.tool_calls (run_id, called_at)
     WHERE run_id IS NOT NULL;
+
+ALTER TABLE agent.agent_steps DROP CONSTRAINT IF EXISTS agent_steps_agent_type_check;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_steps_agent_type_check') THEN
+        ALTER TABLE agent.agent_steps ADD CONSTRAINT agent_steps_agent_type_check CHECK (agent_type IN ('PLANNER', 'INVESTIGATOR', 'KNOWLEDGE', 'DIAGNOSIS', 'CRITIC'));
+    END IF;
+END $$;
+
+ALTER TABLE agent.investigation_runs DROP CONSTRAINT IF EXISTS investigation_runs_status_check;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'investigation_runs_status_check') THEN
+        ALTER TABLE agent.investigation_runs ADD CONSTRAINT investigation_runs_status_check CHECK (status IN (
+            'CREATED', 'PLANNING', 'INVESTIGATING', 'KNOWLEDGE_LOOKUP', 'DIAGNOSING', 'CRITIC_REVIEW',
+            'EVIDENCE_COLLECTED', 'NO_ANOMALY', 'PLANNING_FAILED', 'INVESTIGATION_FAILED', 'INCONCLUSIVE', 'CANCELLED'
+        ));
+    END IF;
+END $$;

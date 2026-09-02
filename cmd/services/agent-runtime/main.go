@@ -23,7 +23,7 @@ func main() {
 	}
 	defer pool.Close()
 	registry := agentruntime.NewMCPRegistry(
-		config.BusinessMCPURL(), config.ObservabilityMCPURL(), nil,
+		config.BusinessMCPURL(), config.ObservabilityMCPURL(), nil, config.KnowledgeMCPURL(),
 	)
 	if err := discoverWithRetry(ctx, registry, 30*time.Second); err != nil {
 		log.Fatal(err)
@@ -40,8 +40,9 @@ func main() {
 	} else {
 		planner := agentruntime.NewPlanner(chatModel, modelName, registry)
 		investigator := agentruntime.NewInvestigator(chatModel, modelName, registry, repository)
-		orchestrator = agentruntime.NewOrchestrator(
-			repository, planner, investigator, slog.Default(),
+		orchestrator = agentruntime.NewOrchestratorWithPhase4(
+			repository, planner, investigator, registry, slog.Default(),
+			chatModel,
 		)
 		go func() {
 			if err := orchestrator.RunWorker(ctx); err != nil {

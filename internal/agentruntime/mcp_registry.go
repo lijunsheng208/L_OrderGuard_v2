@@ -27,16 +27,21 @@ func NewMCPRegistry(
 	businessEndpoint string,
 	observabilityEndpoint string,
 	httpClient *http.Client,
+	optionalKnowledge ...string,
 ) *MCPRegistry {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 5 * time.Second}
 	}
+	clients := map[string]*mcp.Client{
+		"business":      mcp.NewClient(businessEndpoint, httpClient),
+		"observability": mcp.NewClient(observabilityEndpoint, httpClient),
+	}
+	if len(optionalKnowledge) > 0 && optionalKnowledge[0] != "" {
+		clients["knowledge"] = mcp.NewClient(optionalKnowledge[0], httpClient)
+	}
 	return &MCPRegistry{
-		clients: map[string]*mcp.Client{
-			"business":      mcp.NewClient(businessEndpoint, httpClient),
-			"observability": mcp.NewClient(observabilityEndpoint, httpClient),
-		},
-		tools: make(map[string]RegisteredTool),
+		clients: clients,
+		tools:   make(map[string]RegisteredTool),
 	}
 }
 
