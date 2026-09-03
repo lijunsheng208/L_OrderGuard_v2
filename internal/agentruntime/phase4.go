@@ -38,10 +38,31 @@ func (o *Orchestrator) RunDiagnosisAgent(ctx context.Context, run Run, investiga
 	if err := decodeModelJSON(response.Content, &result); err != nil {
 		return Diagnosis{}, fmt.Errorf("decode diagnosis: %w", err)
 	}
+	// Keep the model's explanation fields, but let strong structured evidence own
+	// the root-cause classification.
+	if expected := deterministicDiagnosis(evidence); expected.Confidence >= 0.78 {
+		result.RootCause = expected.RootCause
+		result.Confidence = expected.Confidence
+		result.EvidenceIDs = expected.EvidenceIDs
+		result.RecommendedAction = expected.RecommendedAction
+	}
 	if err := validateDiagnosis(result, evidence); err != nil {
 		return Diagnosis{}, err
 	}
 	return result, nil
+}
+
+func deterministicDiagnosis(evidence []Evidence) Diagnosis {
+	signals := diagnosticSignals{}
+	ids := make([]string, 0, len(evidence))
+	for _, item := range evidence {
+		ids = append(ids, item.EvidenceID)
+		signals.observe(item)
+	}
+	if len(ids) == 0 || !signals.hasInventory || !signals.hasPayment {
+		return Diagnosis{RootCause: "NO_CONFIRMED_ROOT_CAUSE", Confidence: 0.35, EvidenceIDs: ids}
+	}
+	return signals.diagnosis(ids)
 }
 
 // RunCriticAgent 调用 Eino Critic Agent，并在模型结论后执行确定性证据校验。
@@ -280,42 +301,103 @@ func (o *Orchestrator) DiagnoseFromEvidence(ctx context.Context, run Run) (Diagn
 		return Diagnosis{}, err
 	}
 	ids := make([]string, 0)
-	hasInventory := false
-	notDeducted := false
-	deducted := false
-	hasPayment := false
-	paymentSuccess := false
-	outboxPublished := false
+	signals := diagnosticSignals{}
 	for _, item := range evidence {
 		ids = append(ids, item.EvidenceID)
-		if item.ToolName == "get_inventory_status" {
-			hasInventory = true
-			data := string(item.Data)
-			notDeducted = notDeducted || contains(data, "NOT_DEDUCTED")
-			deducted = deducted || contains(data, "DEDUCTED")
-		}
-		if item.ToolName == "get_payment_status" {
-			hasPayment = true
-			paymentSuccess = paymentSuccess || contains(string(item.Data), "SUCCESS")
-		}
-		if item.ToolName == "get_outbox_status" {
-			outboxPublished = outboxPublished || contains(string(item.Data), "PUBLISHED")
-		}
+		signals.observe(item)
 	}
-	if !hasInventory || !hasPayment || len(ids) == 0 {
+	if len(ids) == 0 || !signals.hasInventory || !signals.hasPayment {
 		return Diagnosis{}, errors.New("insufficient evidence")
 	}
-	d := Diagnosis{RootCause: "NO_CONFIRMED_ROOT_CAUSE", Confidence: 0.35, EvidenceIDs: ids}
-	if !notDeducted && deducted && paymentSuccess && (outboxPublished || !hasPayment) {
-		d.RootCause = "NO_ISSUE"
-		d.Confidence = 0.9
-	}
-	if notDeducted {
-		d.RootCause = "PAYMENT_EVENT_NOT_PUBLISHED"
-		d.Confidence = 0.78
-		d.RecommendedAction = "DEDUCT_INVENTORY_ONCE"
-	}
+	d := signals.diagnosis(ids)
 	return d, nil
+}
+
+type diagnosticSignals struct {
+	hasInventory, hasPayment, hasOutbox, paymentSuccess, inventoryDeducted, inventoryNotDeducted bool
+	outboxStatus                                                                                 string
+	outboxFound, eventFound                                                                      *bool
+	consumerReceived, consumerSuccess, consumerFailure                                           bool
+}
+
+func (s *diagnosticSignals) observe(item Evidence) {
+	var data map[string]any
+	if json.Unmarshal(item.Data, &data) != nil {
+		return
+	}
+	switch item.ToolName {
+	case "get_inventory_status":
+		s.hasInventory = true
+		v, _ := data["status"].(string)
+		if v == "DEDUCTED" {
+			s.inventoryDeducted = true
+		}
+		if v == "NOT_DEDUCTED" {
+			s.inventoryNotDeducted = true
+		}
+	case "get_payment_status":
+		s.hasPayment = true
+		s.paymentSuccess = stringValue(data, "status") == "SUCCESS"
+	case "get_outbox_status":
+		s.hasOutbox = true
+		if v, ok := data["found"].(bool); ok {
+			s.outboxFound = &v
+		}
+		s.outboxStatus = stringValue(data, "publish_status")
+	case "get_event_record":
+		if v, ok := data["found"].(bool); ok {
+			s.eventFound = &v
+		}
+	case "search_service_logs", "get_trace":
+		b, _ := json.Marshal(data)
+		text := strings.ToLower(string(b))
+		inventorySignal := strings.Contains(text, "inventory") && (strings.Contains(text, "consume") || strings.Contains(text, "deduct") || strings.Contains(text, "received") || strings.Contains(text, "库存"))
+		if inventorySignal {
+			s.consumerReceived = true
+			if strings.Contains(text, "success") || strings.Contains(text, "\"status\":\"ok\"") || strings.Contains(text, "\"status\":\"success\"") {
+				s.consumerSuccess = true
+			}
+			if strings.Contains(text, "error") || strings.Contains(text, "fail") || strings.Contains(text, "rollback") {
+				s.consumerFailure = true
+			}
+		}
+	}
+}
+
+func stringValue(data map[string]any, key string) string {
+	v, _ := data[key].(string)
+	return strings.ToUpper(strings.TrimSpace(v))
+}
+
+func (s diagnosticSignals) diagnosis(ids []string) Diagnosis {
+	d := Diagnosis{RootCause: "NO_CONFIRMED_ROOT_CAUSE", Confidence: 0.35, EvidenceIDs: ids}
+	if s.paymentSuccess && s.inventoryDeducted && s.hasOutbox && s.outboxStatus == "PUBLISHED" {
+		d.RootCause, d.Confidence = "NO_ISSUE", 0.95
+		return d
+	}
+	if s.paymentSuccess && s.outboxFound != nil && !*s.outboxFound {
+		d.RootCause, d.Confidence = "PAYMENT_EVENT_NOT_CREATED", 0.9
+		return d
+	}
+	if s.paymentSuccess && (s.outboxStatus == "PENDING" || s.outboxStatus == "FAILED") {
+		d.RootCause, d.Confidence = "PAYMENT_EVENT_NOT_PUBLISHED", 0.9
+		d.RecommendedAction = "DEDUCT_INVENTORY_ONCE"
+		return d
+	}
+	if s.outboxStatus == "PUBLISHED" && s.eventFound != nil && !*s.eventFound {
+		d.RootCause, d.Confidence = "EVENT_NOT_AVAILABLE_AFTER_PUBLISH", 0.88
+		return d
+	}
+	if s.inventoryNotDeducted && s.eventFound != nil && *s.eventFound {
+		if s.consumerSuccess {
+			d.RootCause, d.Confidence = "INVENTORY_DEDUCTION_NOT_PERSISTED", 0.82
+		} else if s.consumerFailure {
+			d.RootCause, d.Confidence = "INVENTORY_DEDUCTION_FAILED", 0.82
+		} else if !s.consumerReceived {
+			d.RootCause, d.Confidence = "INVENTORY_EVENT_NOT_CONSUMED", 0.78
+		}
+	}
+	return d
 }
 
 // CriticReview 校验诊断证据引用和允许的根因枚举。
@@ -335,6 +417,18 @@ func (o *Orchestrator) CriticReview(ctx context.Context, runID string, diagnosis
 	}
 	if !RootCauseCodes()[diagnosis.RootCause] {
 		return errors.New("critic rejected unknown root cause")
+	}
+	signals := diagnosticSignals{}
+	for _, item := range evidence {
+		signals.observe(item)
+	}
+	if signals.hasInventory && signals.hasPayment {
+		expected := signals.diagnosis(nil)
+		// A deterministic, high-confidence classification must not be overridden by
+		// a model conclusion that contradicts the observed state machine.
+		if expected.Confidence >= 0.78 && diagnosis.RootCause != expected.RootCause {
+			return fmt.Errorf("critic rejected diagnosis: expected %s from evidence, got %s", expected.RootCause, diagnosis.RootCause)
+		}
 	}
 	return nil
 }
@@ -359,7 +453,8 @@ func (o *Orchestrator) RunVerifyAgent(ctx context.Context, run Run, facts map[st
 		return fmt.Errorf("verify agent: %w", err)
 	}
 	var result struct {
-		Approved   bool `json:"approved"`
+		Approved   bool   `json:"approved"`
+		Summary    string `json:"summary,omitempty"`
 		Assertions []struct {
 			Name   string `json:"name"`
 			Passed bool   `json:"passed"`

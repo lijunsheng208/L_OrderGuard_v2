@@ -24,6 +24,19 @@ type Repository struct {
 	db *pgxpool.Pool
 }
 
+// RetryEvent reloads an Outbox event and processes it through the normal idempotent consumer path.
+func (r *Repository) RetryEvent(ctx context.Context, eventID string) ([]Deduction, error) {
+	var payload []byte
+	if err := r.db.QueryRow(ctx, `SELECT payload FROM payments.outbox_events WHERE event_id=$1`, eventID).Scan(&payload); err != nil {
+		return nil, err
+	}
+	var event payment.Event
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return nil, err
+	}
+	return r.Consume(ctx, event)
+}
+
 // DeductOnce 在事务中二次确认订单和支付状态，并执行幂等库存扣减。
 func (r *Repository) DeductOnce(ctx context.Context, orderID string, items []Item, key string) ([]Deduction, error) {
 	if orderID == "" || key == "" || len(items) == 0 {

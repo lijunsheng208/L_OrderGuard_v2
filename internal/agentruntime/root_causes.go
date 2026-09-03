@@ -25,6 +25,36 @@ var RootCauseCatalog = []RootCauseDefinition{
 		Exclusion:        "事件已发布且库存消费者已经成功处理时，不能选择此原因。",
 	},
 	{
+		Code:             "PAYMENT_EVENT_NOT_CREATED",
+		Meaning:          "支付已经成功，但没有创建对应的支付成功 Outbox 事件。",
+		SupportingSignal: "支付为 SUCCESS，Outbox found=false。",
+		Exclusion:        "存在 Outbox 记录时不能选择此原因。",
+	},
+	{
+		Code:             "EVENT_NOT_AVAILABLE_AFTER_PUBLISH",
+		Meaning:          "Outbox 标记已发布，但消息系统中无法读取对应事件。",
+		SupportingSignal: "Outbox 为 PUBLISHED 且事件查询 found=false。",
+		Exclusion:        "事件明确存在，或 Outbox 尚未发布时不能选择此原因。",
+	},
+	{
+		Code:             "INVENTORY_EVENT_NOT_CONSUMED",
+		Meaning:          "支付成功事件存在，但库存消费者没有处理该事件。",
+		SupportingSignal: "事件 found=true、库存 NOT_DEDUCTED，且没有消费者接收或处理记录。",
+		Exclusion:        "存在消费者失败记录或消费者成功记录时不能选择此原因。",
+	},
+	{
+		Code:             "INVENTORY_DEDUCTION_FAILED",
+		Meaning:          "库存消费者收到了事件，但扣减操作失败。",
+		SupportingSignal: "消费者收到事件且存在明确的错误、失败或异常状态，库存为 NOT_DEDUCTED。",
+		Exclusion:        "消费者成功且库存未持久化时应选择 INVENTORY_DEDUCTION_NOT_PERSISTED。",
+	},
+	{
+		Code:             "INVENTORY_DEDUCTION_NOT_PERSISTED",
+		Meaning:          "消费者日志或 Trace 显示扣减成功，但最终库存状态没有持久化。",
+		SupportingSignal: "消费者成功/扣减 OK，同时库存为 NOT_DEDUCTED。",
+		Exclusion:        "没有消费者成功证据时不能选择此原因。",
+	},
+	{
 		Code:             "INVENTORY_CONSUMER_UNAVAILABLE",
 		Meaning:          "支付成功事件已经发布，但库存消费者没有成功处理该事件，例如消费者不可用、消费失败或消息持续处于待处理状态。",
 		SupportingSignal: "事件存在且 Outbox 为 PUBLISHED，但库存仍为 NOT_DEDUCTED，同时存在库存服务错误日志、Trace 或未确认消息证据。",

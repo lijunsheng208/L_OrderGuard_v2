@@ -23,7 +23,28 @@ func NewHandler(repository *Repository) http.Handler {
 	mux.HandleFunc("GET /inventory/{id}/status", handler.getStatus)
 	mux.HandleFunc("GET /stocks/{id}", handler.getStock)
 	mux.HandleFunc("POST /inventory/{id}/deduct-once", handler.deductOnce)
+	mux.HandleFunc("POST /inventory/events/{id}/redeliver", handler.redeliver)
+	mux.HandleFunc("POST /inventory/{id}/deduct-retry", handler.deductRetry)
+	mux.HandleFunc("GET /inventory/{id}/reconcile", handler.reconcile)
 	return tracing.Middleware(mux)
+}
+
+func (h *Handler) redeliver(w http.ResponseWriter, request *http.Request) {
+	result, err := h.repository.RetryEvent(request.Context(), request.PathValue("id"))
+	if err != nil {
+		httpx.WriteError(w, 502, "EVENT_REDELIVERY_FAILED", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": "processed", "deductions": result})
+}
+func (h *Handler) deductRetry(w http.ResponseWriter, request *http.Request) { h.deductOnce(w, request) }
+func (h *Handler) reconcile(w http.ResponseWriter, request *http.Request) {
+	result, err := h.repository.GetOrderStatus(request.Context(), request.PathValue("id"))
+	if err != nil {
+		httpx.WriteError(w, 502, "RECONCILE_FAILED", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"order_id": request.PathValue("id"), "inventory": result, "reconciled": result.Status == Deducted && result.SuccessfulDeductionCount == 1})
 }
 
 // deductOnce 在二次读取业务状态后执行幂等库存扣减。

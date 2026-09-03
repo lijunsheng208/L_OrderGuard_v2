@@ -24,6 +24,75 @@ type Repository struct {
 	db *pgxpool.Pool
 }
 
+// InjectDemoFault mutates only demo-order records to create a reproducible fault.
+func (r *Repository) InjectDemoFault(ctx context.Context, orderID, faultType string) error {
+	if strings.TrimSpace(orderID) == "" || !strings.HasPrefix(orderID, "O-DEMO-") {
+		return errors.New("fault injection is limited to O-DEMO-* orders")
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM orders.orders WHERE id=$1)`, orderID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return ErrRunNotFound
+	}
+	switch faultType {
+	case "OUTBOX_NOT_PUBLISHED":
+		// FAILED is intentionally excluded from the publisher's automatic PENDING scan,
+		// so the injected incident remains reproducible until an explicit retry action.
+		_, err = tx.Exec(ctx, `UPDATE payments.outbox_events SET publish_status='FAILED', published_at=NULL WHERE aggregate_id=$1`, orderID)
+		if err == nil {
+			err = restoreDemoStock(ctx, tx, orderID)
+		}
+		if err == nil {
+			_, err = tx.Exec(ctx, `DELETE FROM inventory.deductions WHERE order_id=$1`, orderID)
+		}
+		if err == nil {
+			_, err = tx.Exec(ctx, `DELETE FROM inventory.consumed_events WHERE event_id IN (SELECT event_id FROM payments.outbox_events WHERE aggregate_id=$1)`, orderID)
+		}
+	case "INVENTORY_CONSUMER_FAILED":
+		if err = restoreDemoStock(ctx, tx, orderID); err == nil {
+			_, err = tx.Exec(ctx, `DELETE FROM inventory.deductions WHERE order_id=$1`, orderID)
+		}
+		if err == nil {
+			_, err = tx.Exec(ctx, `DELETE FROM inventory.consumed_events WHERE event_id IN (SELECT event_id FROM payments.outbox_events WHERE aggregate_id=$1)`, orderID)
+		}
+		if err == nil {
+			_, err = tx.Exec(ctx, `INSERT INTO observability.signals (trace_id, order_id, service_name, signal_type, operation, status, message, attributes, started_at, finished_at) VALUES ($1,$2,'inventory-service','LOG','consume_payment_event','ERROR','inventory consumer failed', '{}'::jsonb, now(), now())`, "trace-demo-failure-"+orderID, orderID)
+		}
+	case "INVENTORY_DEDUCTION_NOT_PERSISTED":
+		if err = restoreDemoStock(ctx, tx, orderID); err == nil {
+			_, err = tx.Exec(ctx, `DELETE FROM inventory.deductions WHERE order_id=$1`, orderID)
+		}
+		if err == nil {
+			_, err = tx.Exec(ctx, `DELETE FROM inventory.consumed_events WHERE event_id IN (SELECT event_id FROM payments.outbox_events WHERE aggregate_id=$1)`, orderID)
+		}
+		if err == nil {
+			_, err = tx.Exec(ctx, `INSERT INTO observability.signals (trace_id, order_id, service_name, signal_type, operation, status, message, attributes, started_at, finished_at) VALUES ($1,$2,'inventory-service','LOG','deduct_inventory','OK','payment event consumed and inventory deducted', '{"deduction_count":1}'::jsonb, now(), now())`, "trace-demo-persist-"+orderID, orderID)
+		}
+	default:
+		return fmt.Errorf("unsupported demo fault type: %s", faultType)
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func restoreDemoStock(ctx context.Context, tx pgx.Tx, orderID string) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE inventory.stocks s
+		SET available = s.available + d.quantity, version = s.version + 1, updated_at = now()
+		FROM (SELECT sku_id, SUM(quantity) AS quantity FROM inventory.deductions WHERE order_id=$1 GROUP BY sku_id) d
+		WHERE s.sku_id = d.sku_id`, orderID)
+	return err
+}
+
 // CreateRepairPlan 保存一次待执行的修复方案。
 func (r *Repository) CreateRepairPlan(ctx context.Context, runID, action string, evidenceVersion int64, payload any) (string, error) {
 	id := newID("repair-plan")

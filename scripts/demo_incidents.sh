@@ -80,11 +80,13 @@ cat <<'INFO'
 
 2. O-DEMO-EVENT-LOST
    PAID / SUCCESS / PUBLISHED / NOT_DEDUCTED
-   预期：Diagnosis = PAYMENT_EVENT_NOT_PUBLISHED，审批后可执行 DEDUCT_INVENTORY_ONCE，最后进入 Verify。
+   预期：Diagnosis = EVENT_NOT_AVAILABLE_AFTER_PUBLISH；需要补充投递证据后再决定是否修复。
 
 3. O-DEMO-STATE-CONFLICT
    Trace/Logs 显示库存扣减成功，但快照为 NOT_DEDUCTED
    预期：Diagnosis = NO_CONFIRMED_ROOT_CAUSE，进入 INCONCLUSIVE，不审批、不修复、不调用 Verify。
+
+4. 其他故障可通过前端“演示故障注入”创建：Outbox 未发布、库存消费者失败、库存扣减未持久化。
 
 在前端分别使用对应订单号发起调查即可。
 INFO

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/lijunsheng/orderguard/internal/eventbus"
 	"github.com/lijunsheng/orderguard/internal/httpx"
 	"github.com/lijunsheng/orderguard/internal/tracing"
 )
@@ -12,17 +13,36 @@ import (
 // Handler 提供支付和 Outbox 状态查询接口。
 type Handler struct {
 	repository *Repository
+	stream     *eventbus.RedisStream
 }
 
 // NewHandler 创建支付 HTTP Handler。
-func NewHandler(repository *Repository) http.Handler {
-	handler := &Handler{repository: repository}
+func NewHandler(repository *Repository, streams ...*eventbus.RedisStream) http.Handler {
+	var stream *eventbus.RedisStream
+	if len(streams) > 0 {
+		stream = streams[0]
+	}
+	handler := &Handler{repository: repository, stream: stream}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", paymentHealth)
 	mux.HandleFunc("POST /demo/orders/{id}/pay", handler.pay)
 	mux.HandleFunc("GET /payments/{id}", handler.get)
 	mux.HandleFunc("GET /events/{id}/payment-succeeded", handler.getEvent)
+	mux.HandleFunc("POST /outbox/{id}/retry", handler.retryOutbox)
 	return tracing.Middleware(mux)
+}
+
+func (h *Handler) retryOutbox(w http.ResponseWriter, request *http.Request) {
+	if h.stream == nil {
+		httpx.WriteError(w, 503, "RETRY_UNAVAILABLE", "event stream is not configured")
+		return
+	}
+	result, err := h.repository.RetryOutbox(request.Context(), h.stream, request.PathValue("id"))
+	if err != nil {
+		httpx.WriteError(w, 502, "OUTBOX_RETRY_FAILED", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, result)
 }
 
 // paymentHealth 返回支付服务健康状态。

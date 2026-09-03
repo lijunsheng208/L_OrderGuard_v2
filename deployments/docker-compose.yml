@@ -3,6 +3,7 @@ name: orderguard-v2
 x-go-service: &go-service
   restart: unless-stopped
   environment:
+    TZ: "${TZ:-Asia/Shanghai}"
     HTTP_ADDR: "${HTTP_ADDR:-:8080}"
     DATABASE_URL: "${DOCKER_DATABASE_URL:-postgres://orderguard:orderguard@postgres:5432/orderguard?sslmode=disable}"
     REDIS_ADDR: "${DOCKER_REDIS_ADDR:-redis:6379}"
@@ -32,10 +33,12 @@ x-go-service: &go-service
 services:
   postgres:
     image: postgres:18-alpine
+    command: ["postgres", "-c", "timezone=Asia/Shanghai"]
     environment:
       POSTGRES_DB: orderguard
       POSTGRES_USER: orderguard
       POSTGRES_PASSWORD: orderguard
+      TZ: "${TZ:-Asia/Shanghai}"
     volumes:
       - postgres-data:/var/lib/postgresql
     ports: ["${POSTGRES_PORT:-55432}:5432"]
@@ -60,6 +63,7 @@ services:
   migrate:
     image: postgres:18-alpine
     environment:
+      TZ: "${TZ:-Asia/Shanghai}"
       PGHOST: postgres
       PGPORT: 5432
       PGDATABASE: orderguard

@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS payments.outbox_events (
     event_type TEXT NOT NULL,
     payload JSONB NOT NULL,
     publish_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (
-        publish_status IN ('PENDING', 'PUBLISHED')
+        publish_status IN ('PENDING', 'PUBLISHED', 'FAILED')
     ),
     attempts INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -27,4 +27,3 @@ CREATE TABLE IF NOT EXISTS payments.outbox_events (
 CREATE INDEX IF NOT EXISTS outbox_pending_idx
     ON payments.outbox_events (created_at)
     WHERE publish_status = 'PENDING';
-

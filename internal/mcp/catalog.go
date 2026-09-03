@@ -92,6 +92,10 @@ func Profiles() map[string]ServerProfile {
 					"idempotency_key":  stringField("幂等键"),
 					"evidence_version": stringField("证据版本"),
 				}, "order_id", "items", "idempotency_key", "evidence_version")),
+				writeTool("retry_outbox_publish", "重试发布指定 Outbox 事件", objectSchema(fields{"event_id": stringField("事件 ID")}, "event_id")),
+				writeTool("retry_inventory_consumer", "重新处理指定库存事件", objectSchema(fields{"event_id": stringField("事件 ID")}, "event_id")),
+				writeTool("retry_inventory_deduction", "重试库存扣减", objectSchema(fields{"order_id": stringField("订单 ID"), "items": arrayField("待扣减商品", map[string]any{"type": "object"}), "idempotency_key": stringField("幂等键")}, "order_id", "items", "idempotency_key")),
+				writeTool("reconcile_inventory_state", "对账库存状态和扣减记录", objectSchema(fields{"order_id": stringField("订单 ID")}, "order_id")),
 			},
 		},
 	}

@@ -262,6 +262,28 @@ func (r *Repository) PublishPending(
 	return published, nil
 }
 
+// RetryOutbox republishes one event by its stable event_id.
+func (r *Repository) RetryOutbox(ctx context.Context, stream *eventbus.RedisStream, eventID string) (OutboxEvent, error) {
+	var item OutboxEvent
+	var payload json.RawMessage
+	err := r.db.QueryRow(ctx, `SELECT event_id, aggregate_id, event_type, payload, publish_status, attempts, created_at, published_at FROM payments.outbox_events WHERE event_id=$1`, eventID).Scan(&item.EventID, &item.AggregateID, &item.EventType, &payload, &item.PublishStatus, &item.Attempts, &item.CreatedAt, &item.PublishedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return OutboxEvent{}, ErrOrderNotFound
+	}
+	if err != nil {
+		return OutboxEvent{}, err
+	}
+	if err := json.Unmarshal(payload, &item.Event); err != nil {
+		return OutboxEvent{}, err
+	}
+	if err := stream.Publish(ctx, item.EventID, item.Event); err != nil {
+		return OutboxEvent{}, err
+	}
+	_, err = r.db.Exec(ctx, `UPDATE payments.outbox_events SET publish_status='PUBLISHED', attempts=attempts+1, published_at=now() WHERE event_id=$1`, eventID)
+	item.PublishStatus, item.Attempts = "PUBLISHED", item.Attempts+1
+	return item, err
+}
+
 // getPaymentTx 在支付事务中查询已有支付。
 func getPaymentTx(ctx context.Context, tx pgx.Tx, orderID string) (Payment, bool, error) {
 	var result Payment

@@ -12,6 +12,6 @@ import (
 // main 启动受控修复 MCP Server。
 func main() {
 	profile := mcp.Profiles()["remediation"]
-	server := mcp.NewServer(profile, slog.Default(), mcp.WithToolHandlers(remediationtools.Handlers(config.InventoryServiceURL())))
+	server := mcp.NewServer(profile, slog.Default(), mcp.WithToolHandlers(remediationtools.Handlers(config.InventoryServiceURL(), config.PaymentServiceURL())))
 	app.RunHTTP(profile.Name, ":8080", server.Handler())
 }

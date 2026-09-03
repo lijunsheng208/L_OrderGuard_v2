@@ -28,7 +28,7 @@ func main() {
 		redisClient, config.EventStream(), "inventory", "payment-publisher",
 	)
 	go publishOutbox(context.Background(), repository, stream)
-	app.RunHTTP("payment-service", ":8080", payment.NewHandler(repository))
+	app.RunHTTP("payment-service", ":8080", payment.NewHandler(repository, stream))
 }
 
 // publishOutbox 定时把已提交的支付 Outbox 事件发布到 Redis。

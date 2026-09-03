@@ -1,10 +1,13 @@
 package agentruntime
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -34,7 +37,73 @@ func NewHandler(repository *Repository, orchestrator *Orchestrator) http.Handler
 	mux.HandleFunc("GET /api/v1/investigations/{id}/events", handler.streamEvents)
 	mux.HandleFunc("POST /api/v1/investigations/{id}/approve", handler.approveRun)
 	mux.HandleFunc("POST /api/v1/investigations/{id}/execute", handler.executeRun)
+	mux.HandleFunc("POST /api/v1/demo/faults", handler.injectDemoFault)
 	return tracing.Middleware(cors(mux))
+}
+
+func (h *Handler) injectDemoFault(w http.ResponseWriter, request *http.Request) {
+	var input struct {
+		OrderID   string `json:"order_id"`
+		FaultType string `json:"fault_type"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, request.Body, 1<<16)).Decode(&input); err != nil {
+		httpx.WriteError(w, 400, "INVALID_JSON", "invalid fault request")
+		return
+	}
+	orderID := strings.TrimSpace(input.OrderID)
+	if orderID == "" {
+		var err error
+		orderID, err = h.createDemoOrder(request.Context())
+		if err != nil {
+			httpx.WriteError(w, 502, "DEMO_ORDER_CREATION_FAILED", err.Error())
+			return
+		}
+	}
+	if err := h.repository.InjectDemoFault(request.Context(), orderID, input.FaultType); err != nil {
+		if errors.Is(err, ErrRunNotFound) {
+			httpx.WriteError(w, 404, "ORDER_NOT_FOUND", "order was not found")
+			return
+		}
+		httpx.WriteError(w, 400, "FAULT_INJECTION_FAILED", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, 200, map[string]any{"order_id": orderID, "fault_type": input.FaultType, "status": "injected"})
+}
+
+// createDemoOrder creates and pays a disposable order before fault injection.
+func (h *Handler) createDemoOrder(ctx context.Context) (string, error) {
+	orderID := "O-DEMO-INJECT-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	paymentID := "P-DEMO-INJECT-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	client := &http.Client{Timeout: 5 * time.Second}
+	orderBody := map[string]any{"id": orderID, "user_id": "U-DEMO", "items": []map[string]any{{"sku_id": "SKU1", "quantity": 1, "unit_price": 19900}}}
+	if err := postJSON(ctx, client, config.OrderServiceURL()+"/demo/orders", orderBody); err != nil {
+		return "", err
+	}
+	if err := postJSON(ctx, client, config.PaymentServiceURL()+"/demo/orders/"+url.PathEscape(orderID)+"/pay", map[string]any{"payment_id": paymentID, "amount": 19900}); err != nil {
+		return "", err
+	}
+	return orderID, nil
+}
+
+func postJSON(ctx context.Context, client *http.Client, endpoint string, payload any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("upstream returned HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // cors 处理本地 React 控制台的跨域预检请求。
@@ -75,15 +144,41 @@ func (h *Handler) executeRun(w http.ResponseWriter, request *http.Request) {
 		Items          []map[string]any `json:"items"`
 		IdempotencyKey string           `json:"idempotency_key"`
 	}
-	if err := json.NewDecoder(request.Body).Decode(&input); err != nil || len(input.Items) == 0 || input.IdempotencyKey == "" {
+	if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
 		httpx.WriteError(w, 400, "INVALID_EXECUTION", "items and idempotency_key are required")
 		return
+	}
+	var investigation InvestigationResult
+	if err := json.Unmarshal(run.FinalSummary, &investigation); err != nil || investigation.Diagnosis == nil {
+		httpx.WriteError(w, http.StatusConflict, "DIAGNOSIS_REQUIRED", "investigation diagnosis is unavailable")
+		return
+	}
+	action, ok := RepairActionForRootCause(investigation.Diagnosis.RootCause)
+	if !ok {
+		httpx.WriteError(w, http.StatusConflict, "REPAIR_ACTION_UNAVAILABLE", "root cause has no executable repair action")
+		return
+	}
+	if input.IdempotencyKey == "" {
+		input.IdempotencyKey = "repair-" + run.ID + "-" + strings.ToLower(action)
+	}
+	if action == "RETRY_INVENTORY_DEDUCTION" && (len(input.Items) == 0 || input.IdempotencyKey == "") {
+		httpx.WriteError(w, 400, "INVALID_EXECUTION", "items and idempotency_key are required for inventory repair")
+		return
+	}
+	eventID := ""
+	if action == "RETRY_OUTBOX_PUBLISH" || action == "RETRY_INVENTORY_CONSUMER" {
+		evidence, _ := h.repository.ListEvidence(request.Context(), run.ID)
+		eventID = eventIDFromEvidence(evidence)
+		if eventID == "" {
+			httpx.WriteError(w, http.StatusConflict, "EVENT_ID_REQUIRED", "repair requires the original event_id")
+			return
+		}
 	}
 	if err := h.repository.Transition(request.Context(), &run, StatusExecuting, "repair.started", nil); err != nil {
 		httpx.WriteError(w, 409, "EXECUTION_REJECTED", err.Error())
 		return
 	}
-	planID, err := h.repository.CreateRepairPlan(request.Context(), run.ID, "DEDUCT_INVENTORY_ONCE", run.Version, map[string]any{"items": input.Items, "idempotency_key": input.IdempotencyKey})
+	planID, err := h.repository.CreateRepairPlan(request.Context(), run.ID, action, run.Version, map[string]any{"items": input.Items, "idempotency_key": input.IdempotencyKey, "event_id": eventID})
 	if err != nil {
 		httpx.WriteError(w, 500, "REPAIR_PLAN_FAILED", err.Error())
 		return
@@ -97,7 +192,11 @@ func (h *Handler) executeRun(w http.ResponseWriter, request *http.Request) {
 	callErr := client.Initialize(request.Context())
 	var repairResult mcp.ToolCallResult
 	if callErr == nil {
-		repairResult, callErr = client.CallToolWithMetadata(request.Context(), "deduct_inventory_once", map[string]any{"order_id": run.OrderID, "items": input.Items, "idempotency_key": input.IdempotencyKey, "evidence_version": fmt.Sprint(run.Version)}, mcp.RequestMetadata{RunID: run.ID, TraceID: run.TraceID, Caller: "runtime-policy"})
+		args := map[string]any{"order_id": run.OrderID, "items": input.Items, "idempotency_key": input.IdempotencyKey, "evidence_version": fmt.Sprint(run.Version)}
+		if action == "RETRY_OUTBOX_PUBLISH" || action == "RETRY_INVENTORY_CONSUMER" {
+			args = map[string]any{"event_id": eventID}
+		}
+		repairResult, callErr = client.CallToolWithMetadata(request.Context(), remediationToolForAction(action), args, mcp.RequestMetadata{RunID: run.ID, TraceID: run.TraceID, Caller: "runtime-policy"})
 	}
 	if callErr != nil || !repairResult.StructuredContent.Success {
 		_ = h.repository.FinishRepairExecution(request.Context(), executionID, "FAILED", "EXECUTION_FAILED", map[string]any{"error": fmt.Sprint(callErr)})
@@ -107,32 +206,71 @@ func (h *Handler) executeRun(w http.ResponseWriter, request *http.Request) {
 	}
 	_ = h.repository.FinishRepairExecution(request.Context(), executionID, "SUCCEEDED", "", repairResult.StructuredContent)
 	_ = h.repository.Transition(request.Context(), &run, StatusVerifying, "verification.started", nil)
-	verifyReq, _ := http.NewRequestWithContext(request.Context(), http.MethodGet, strings.TrimRight(config.InventoryServiceURL(), "/")+"/inventory/"+run.OrderID+"/status", nil)
-	verifyResp, verifyErr := (&http.Client{}).Do(verifyReq)
-	if verifyErr != nil || verifyResp.StatusCode >= 300 {
-		if verifyResp != nil {
-			verifyResp.Body.Close()
-		}
-		_ = h.repository.Fail(request.Context(), &run, StatusVerificationFailed, "VERIFICATION_FAILED", "inventory verification failed")
+	status, verifyErr := h.waitForInventoryRepair(request.Context(), run.OrderID)
+	if verifyErr != nil {
+		_, _ = h.repository.AppendEvent(request.Context(), run.ID, "verification.failed", map[string]any{"error": verifyErr.Error()})
+		_ = h.repository.Fail(request.Context(), &run, StatusVerificationFailed, "VERIFICATION_FAILED", verifyErr.Error())
 		httpx.WriteError(w, 502, "VERIFICATION_FAILED", "inventory verification failed")
 		return
 	}
-	var status struct {
-		Status     string `json:"status"`
-		Successful int    `json:"successful_deduction_count"`
-	}
-	_ = json.NewDecoder(verifyResp.Body).Decode(&status)
-	verifyResp.Body.Close()
 	facts := map[string]any{"inventory_status": status.Status, "successful_deduction_count": status.Successful}
-	if status.Status != "DEDUCTED" || status.Successful != 1 || h.orchestrator == nil || h.orchestrator.RunVerifyAgent(request.Context(), run, facts) != nil {
+	_, _ = h.repository.AppendEvent(request.Context(), run.ID, "verify.started", map[string]any{"action": action})
+	var assertionErr error
+	if status.Status != "DEDUCTED" || status.Successful != 1 {
+		assertionErr = fmt.Errorf("inventory status=%s successful_deduction_count=%d", status.Status, status.Successful)
+	} else if h.orchestrator == nil {
+		assertionErr = errors.New("verify agent is not configured")
+	} else {
+		assertionErr = h.orchestrator.RunVerifyAgent(request.Context(), run, facts)
+	}
+	if assertionErr != nil {
+		_, _ = h.repository.AppendEvent(request.Context(), run.ID, "verify.completed", map[string]any{"approved": false, "error": assertionErr.Error()})
+		_, _ = h.repository.AppendEvent(request.Context(), run.ID, "verification.failed", map[string]any{"error": assertionErr.Error(), "facts": facts})
 		_ = h.repository.SaveVerificationResult(request.Context(), run.ID, executionID, "FAILED", facts, nil, "verification assertions failed")
-		_ = h.repository.Fail(request.Context(), &run, StatusVerificationFailed, "VERIFICATION_FAILED", "verification assertions failed")
+		_ = h.repository.Fail(request.Context(), &run, StatusVerificationFailed, "VERIFICATION_FAILED", assertionErr.Error())
 		httpx.WriteError(w, 409, "VERIFICATION_FAILED", "verification assertions failed")
 		return
 	}
+	_, _ = h.repository.AppendEvent(request.Context(), run.ID, "verify.completed", map[string]any{"approved": true, "facts": facts})
 	_ = h.repository.SaveVerificationResult(request.Context(), run.ID, executionID, "PASSED", facts, nil, "repair verified")
 	_ = h.repository.Transition(request.Context(), &run, StatusRepaired, "run.repaired", map[string]any{"successful_deduction_count": status.Successful})
 	httpx.WriteJSON(w, http.StatusOK, run)
+}
+
+// waitForInventoryRepair allows the asynchronous consumer to process a retried event.
+type inventoryRepairStatus struct {
+	Status     string `json:"status"`
+	Successful int    `json:"successful_deduction_count"`
+}
+
+func (h *Handler) waitForInventoryRepair(ctx context.Context, orderID string) (inventoryRepairStatus, error) {
+	var status inventoryRepairStatus
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(config.InventoryServiceURL(), "/")+"/inventory/"+url.PathEscape(orderID)+"/status", nil)
+		if err != nil {
+			return status, err
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			if resp.StatusCode < 300 {
+				_ = json.NewDecoder(resp.Body).Decode(&status)
+			}
+			resp.Body.Close()
+			if status.Status == "DEDUCTED" && status.Successful >= 1 {
+				return status, nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return status, fmt.Errorf("inventory status did not reach DEDUCTED")
+		}
+		select {
+		case <-ctx.Done():
+			return status, ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 // approveRun 审批诊断结论；健康订单直接结束，异常订单进入修复执行准备。
@@ -171,8 +309,8 @@ func (h *Handler) approveRun(w http.ResponseWriter, request *http.Request) {
 		httpx.WriteJSON(w, http.StatusOK, run)
 		return
 	}
-	if result.Diagnosis.RecommendedAction == "" {
-		httpx.WriteError(w, http.StatusConflict, "REPAIR_ACTION_REQUIRED", "diagnosis has no approved repair action")
+	if _, ok := RepairActionForRootCause(result.Diagnosis.RootCause); !ok {
+		httpx.WriteError(w, http.StatusConflict, "REPAIR_ACTION_UNAVAILABLE", "diagnosis has no approved repair action")
 		return
 	}
 	if err := h.repository.Transition(request.Context(), &run, StatusPolicyCheck, "policy.checked", map[string]any{"approved": true}); err != nil {
