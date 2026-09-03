@@ -227,6 +227,13 @@ func (r *Repository) PublishPending(
 	}
 	published := 0
 	for _, item := range events {
+		var blocked bool
+		if err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM agent.demo_faults WHERE order_id=$1 AND fault_type='OUTBOX_NOT_PUBLISHED' AND enabled)`, item.AggregateID).Scan(&blocked); err != nil {
+			return published, err
+		}
+		if blocked {
+			continue
+		}
 		if err := stream.Publish(ctx, item.EventID, item.Event); err != nil {
 			return published, err
 		}
@@ -276,6 +283,7 @@ func (r *Repository) RetryOutbox(ctx context.Context, stream *eventbus.RedisStre
 	if err := json.Unmarshal(payload, &item.Event); err != nil {
 		return OutboxEvent{}, err
 	}
+	_, _ = r.db.Exec(ctx, `UPDATE agent.demo_faults SET enabled=false, cleared_at=now() WHERE order_id=$1 AND fault_type='OUTBOX_NOT_PUBLISHED'`, item.AggregateID)
 	if err := stream.Publish(ctx, item.EventID, item.Event); err != nil {
 		return OutboxEvent{}, err
 	}

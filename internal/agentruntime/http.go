@@ -53,13 +53,12 @@ func (h *Handler) injectDemoFault(w http.ResponseWriter, request *http.Request) 
 	orderID := strings.TrimSpace(input.OrderID)
 	if orderID == "" {
 		var err error
-		orderID, err = h.createDemoOrder(request.Context())
+		orderID, err = h.createDemoOrder(request.Context(), input.FaultType)
 		if err != nil {
 			httpx.WriteError(w, 502, "DEMO_ORDER_CREATION_FAILED", err.Error())
 			return
 		}
-	}
-	if err := h.repository.InjectDemoFault(request.Context(), orderID, input.FaultType); err != nil {
+	} else if err := h.repository.InjectDemoFault(request.Context(), orderID, input.FaultType); err != nil {
 		if errors.Is(err, ErrRunNotFound) {
 			httpx.WriteError(w, 404, "ORDER_NOT_FOUND", "order was not found")
 			return
@@ -70,13 +69,17 @@ func (h *Handler) injectDemoFault(w http.ResponseWriter, request *http.Request) 
 	httpx.WriteJSON(w, 200, map[string]any{"order_id": orderID, "fault_type": input.FaultType, "status": "injected"})
 }
 
-// createDemoOrder creates and pays a disposable order before fault injection.
-func (h *Handler) createDemoOrder(ctx context.Context) (string, error) {
+// createDemoOrder creates a disposable order, enables its fault switch, then pays it.
+func (h *Handler) createDemoOrder(ctx context.Context, faultType string) (string, error) {
 	orderID := "O-DEMO-INJECT-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	paymentID := "P-DEMO-INJECT-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	client := &http.Client{Timeout: 5 * time.Second}
 	orderBody := map[string]any{"id": orderID, "user_id": "U-DEMO", "items": []map[string]any{{"sku_id": "SKU1", "quantity": 1, "unit_price": 19900}}}
 	if err := postJSON(ctx, client, config.OrderServiceURL()+"/demo/orders", orderBody); err != nil {
+		return "", err
+	}
+	// Enable the switch before payment creates and publishes the event.
+	if err := h.repository.InjectDemoFault(ctx, orderID, faultType); err != nil {
 		return "", err
 	}
 	if err := postJSON(ctx, client, config.PaymentServiceURL()+"/demo/orders/"+url.PathEscape(orderID)+"/pay", map[string]any{"payment_id": paymentID, "amount": 19900}); err != nil {
@@ -192,16 +195,24 @@ func (h *Handler) executeRun(w http.ResponseWriter, request *http.Request) {
 	callErr := client.Initialize(request.Context())
 	var repairResult mcp.ToolCallResult
 	if callErr == nil {
-		args := map[string]any{"order_id": run.OrderID, "items": input.Items, "idempotency_key": input.IdempotencyKey, "evidence_version": fmt.Sprint(run.Version)}
-		if action == "RETRY_OUTBOX_PUBLISH" || action == "RETRY_INVENTORY_CONSUMER" {
-			args = map[string]any{"event_id": eventID}
+		var args map[string]any
+		args, callErr = remediationArguments(action, run.OrderID, eventID, input.IdempotencyKey, input.Items)
+		if callErr == nil {
+			repairResult, callErr = client.CallToolWithMetadata(request.Context(), remediationToolForAction(action), args, mcp.RequestMetadata{RunID: run.ID, TraceID: run.TraceID, Caller: "runtime-policy"})
 		}
-		repairResult, callErr = client.CallToolWithMetadata(request.Context(), remediationToolForAction(action), args, mcp.RequestMetadata{RunID: run.ID, TraceID: run.TraceID, Caller: "runtime-policy"})
 	}
 	if callErr != nil || !repairResult.StructuredContent.Success {
-		_ = h.repository.FinishRepairExecution(request.Context(), executionID, "FAILED", "EXECUTION_FAILED", map[string]any{"error": fmt.Sprint(callErr)})
-		_ = h.repository.Fail(request.Context(), &run, StatusExecutionFailed, "EXECUTION_FAILED", "inventory repair failed")
-		httpx.WriteError(w, 502, "EXECUTION_FAILED", "inventory repair failed")
+		detail := fmt.Sprint(callErr)
+		if callErr == nil && repairResult.StructuredContent.Error != nil {
+			detail = repairResult.StructuredContent.Error.Code + ": " + repairResult.StructuredContent.Error.Message
+		}
+		if detail == "<nil>" || detail == "" {
+			detail = "remediation tool returned an unsuccessful result"
+		}
+		_ = h.repository.FinishRepairExecution(request.Context(), executionID, "FAILED", "EXECUTION_FAILED", map[string]any{"action": action, "tool": remediationToolForAction(action), "error": detail})
+		_, _ = h.repository.AppendEvent(request.Context(), run.ID, "repair.failed", map[string]any{"action": action, "tool": remediationToolForAction(action), "error": detail})
+		_ = h.repository.Fail(request.Context(), &run, StatusExecutionFailed, "EXECUTION_FAILED", detail)
+		httpx.WriteError(w, 502, "EXECUTION_FAILED", detail)
 		return
 	}
 	_ = h.repository.FinishRepairExecution(request.Context(), executionID, "SUCCEEDED", "", repairResult.StructuredContent)

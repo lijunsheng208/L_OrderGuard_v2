@@ -22,6 +22,23 @@ type MCPRegistry struct {
 	tools   map[string]RegisteredTool
 }
 
+var investigationToolNames = map[string]struct{}{
+	"get_order_snapshot":      {},
+	"get_payment_status":      {},
+	"get_inventory_status":    {},
+	"get_order_state_history": {},
+	"search_service_logs":     {},
+	"get_trace":               {},
+	"get_metric":              {},
+	"get_event_record":        {},
+	"get_outbox_status":       {},
+}
+
+func isInvestigationTool(name string) bool {
+	_, ok := investigationToolNames[name]
+	return ok
+}
+
 // NewMCPRegistry 创建业务与可观测性 MCP 客户端注册表。
 func NewMCPRegistry(
 	businessEndpoint string,
@@ -87,5 +104,17 @@ func (r *MCPRegistry) Definitions() []mcp.Tool {
 	sort.Slice(result, func(left, right int) bool {
 		return result[left].Name < result[right].Name
 	})
+	return result
+}
+
+// InvestigationDefinitions returns only business and observability tools.
+// Knowledge tools belong to the separate Knowledge stage.
+func (r *MCPRegistry) InvestigationDefinitions() []mcp.Tool {
+	result := make([]mcp.Tool, 0, len(investigationToolNames))
+	for _, definition := range r.Definitions() {
+		if isInvestigationTool(definition.Name) {
+			result = append(result, definition)
+		}
+	}
 	return result
 }

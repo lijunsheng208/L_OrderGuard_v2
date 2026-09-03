@@ -31,7 +31,7 @@ func NewEinoMCPTools(
 	guard *ToolGuard,
 	repository *Repository,
 ) []tool.BaseTool {
-	definitions := registry.Definitions()
+	definitions := registry.InvestigationDefinitions()
 	result := make([]tool.BaseTool, 0, len(definitions))
 	for _, definition := range definitions {
 		registered, _ := registry.Get(definition.Name)

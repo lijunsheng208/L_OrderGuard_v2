@@ -381,7 +381,7 @@ func (s diagnosticSignals) diagnosis(ids []string) Diagnosis {
 	}
 	if s.paymentSuccess && (s.outboxStatus == "PENDING" || s.outboxStatus == "FAILED") {
 		d.RootCause, d.Confidence = "PAYMENT_EVENT_NOT_PUBLISHED", 0.9
-		d.RecommendedAction = "DEDUCT_INVENTORY_ONCE"
+		d.RecommendedAction = "RETRY_OUTBOX_PUBLISH"
 		return d
 	}
 	if s.outboxStatus == "PUBLISHED" && s.eventFound != nil && !*s.eventFound {

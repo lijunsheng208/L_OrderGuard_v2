@@ -34,7 +34,24 @@ func (r *Repository) RetryEvent(ctx context.Context, eventID string) ([]Deductio
 	if err := json.Unmarshal(payload, &event); err != nil {
 		return nil, err
 	}
-	return r.Consume(ctx, event)
+	result, err := r.consume(ctx, event, true)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := r.db.Exec(ctx, `UPDATE agent.demo_faults SET enabled=false, cleared_at=now() WHERE order_id=$1 AND fault_type IN ('INVENTORY_CONSUMER_FAILED','INVENTORY_DEDUCTION_NOT_PERSISTED')`, event.AggregateID); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// ReconcileOrder replays the canonical payment event when inventory state is
+// missing, making reconciliation an actual state repair rather than a read.
+func (r *Repository) ReconcileOrder(ctx context.Context, orderID string) ([]Deduction, error) {
+	var eventID string
+	if err := r.db.QueryRow(ctx, `SELECT event_id FROM payments.outbox_events WHERE aggregate_id=$1 ORDER BY created_at DESC LIMIT 1`, orderID).Scan(&eventID); err != nil {
+		return nil, err
+	}
+	return r.RetryEvent(ctx, eventID)
 }
 
 // DeductOnce 在事务中二次确认订单和支付状态，并执行幂等库存扣减。
@@ -42,6 +59,7 @@ func (r *Repository) DeductOnce(ctx context.Context, orderID string, items []Ite
 	if orderID == "" || key == "" || len(items) == 0 {
 		return nil, errors.New("invalid deduction request")
 	}
+	_, _ = r.db.Exec(ctx, `UPDATE agent.demo_faults SET enabled=false, cleared_at=now() WHERE order_id=$1 AND fault_type='INVENTORY_DEDUCTION_NOT_PERSISTED'`, orderID)
 	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, err
@@ -101,14 +119,31 @@ func (r *Repository) Consume(
 	ctx context.Context,
 	event payment.Event,
 ) ([]Deduction, error) {
+	return r.consume(ctx, event, false)
+}
+
+func (r *Repository) consume(ctx context.Context, event payment.Event, bypassDemoFault bool) ([]Deduction, error) {
 	if event.EventID == "" || event.AggregateID == "" || len(event.Items) == 0 {
 		return nil, errors.New("invalid payment event")
+	}
+	if !bypassDemoFault {
+		var blocked bool
+		if err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM agent.demo_faults WHERE order_id=$1 AND enabled AND fault_type IN ('INVENTORY_CONSUMER_FAILED','INVENTORY_DEDUCTION_NOT_PERSISTED'))`, event.AggregateID).Scan(&blocked); err != nil {
+			return nil, err
+		}
+		if blocked {
+			return nil, errors.New("demo inventory consumer fault is enabled")
+		}
 	}
 	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("begin inventory deduction: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	// Serialize the same event across background delivery and manual replay.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, event.EventID); err != nil {
+		return nil, fmt.Errorf("lock inventory event: %w", err)
+	}
 	traceID := event.TraceID
 	if traceID == "" {
 		traceID = tracing.NewID()

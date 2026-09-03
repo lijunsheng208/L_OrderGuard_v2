@@ -39,12 +39,17 @@ func (h *Handler) redeliver(w http.ResponseWriter, request *http.Request) {
 }
 func (h *Handler) deductRetry(w http.ResponseWriter, request *http.Request) { h.deductOnce(w, request) }
 func (h *Handler) reconcile(w http.ResponseWriter, request *http.Request) {
-	result, err := h.repository.GetOrderStatus(request.Context(), request.PathValue("id"))
+	result, err := h.repository.ReconcileOrder(request.Context(), request.PathValue("id"))
 	if err != nil {
 		httpx.WriteError(w, 502, "RECONCILE_FAILED", err.Error())
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"order_id": request.PathValue("id"), "inventory": result, "reconciled": result.Status == Deducted && result.SuccessfulDeductionCount == 1})
+	status, err := h.repository.GetOrderStatus(request.Context(), request.PathValue("id"))
+	if err != nil {
+		httpx.WriteError(w, 502, "RECONCILE_FAILED", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"order_id": request.PathValue("id"), "deductions": result, "inventory": status, "reconciled": status.Status == Deducted && status.SuccessfulDeductionCount >= 1})
 }
 
 // deductOnce 在二次读取业务状态后执行幂等库存扣减。

@@ -2,6 +2,8 @@ package agentruntime
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 )
 
 // RepairActionForRootCause maps only confirmed, executable causes to actions.
@@ -12,7 +14,9 @@ func RepairActionForRootCause(rootCause string) (string, bool) {
 	case "INVENTORY_EVENT_NOT_CONSUMED":
 		return "RETRY_INVENTORY_CONSUMER", true
 	case "INVENTORY_DEDUCTION_FAILED":
-		return "RETRY_INVENTORY_DEDUCTION", true
+		// A consumer-side processing error must replay the original event first;
+		// direct deduction would bypass the failed consumer and can duplicate work.
+		return "RETRY_INVENTORY_CONSUMER", true
 	case "INVENTORY_DEDUCTION_NOT_PERSISTED":
 		return "RECONCILE_INVENTORY_STATE", true
 	default:
@@ -32,6 +36,30 @@ func remediationToolForAction(action string) string {
 		return "reconcile_inventory_state"
 	default:
 		return ""
+	}
+}
+
+// remediationArguments builds the exact argument object accepted by each MCP
+// tool. MCP schemas reject unrelated fields through additionalProperties=false.
+func remediationArguments(action, orderID, eventID, idempotencyKey string, items []map[string]any) (map[string]any, error) {
+	switch action {
+	case "RETRY_OUTBOX_PUBLISH", "RETRY_INVENTORY_CONSUMER":
+		if eventID == "" {
+			return nil, fmt.Errorf("%s requires event_id", action)
+		}
+		return map[string]any{"event_id": eventID}, nil
+	case "RETRY_INVENTORY_DEDUCTION":
+		if orderID == "" || idempotencyKey == "" || len(items) == 0 {
+			return nil, errors.New("RETRY_INVENTORY_DEDUCTION requires order_id, items and idempotency_key")
+		}
+		return map[string]any{"order_id": orderID, "items": items, "idempotency_key": idempotencyKey}, nil
+	case "RECONCILE_INVENTORY_STATE":
+		if orderID == "" {
+			return nil, errors.New("RECONCILE_INVENTORY_STATE requires order_id")
+		}
+		return map[string]any{"order_id": orderID}, nil
+	default:
+		return nil, fmt.Errorf("unknown remediation action %s", action)
 	}
 }
 

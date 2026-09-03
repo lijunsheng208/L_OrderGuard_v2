@@ -43,9 +43,8 @@ func (r *Repository) InjectDemoFault(ctx context.Context, orderID, faultType str
 	}
 	switch faultType {
 	case "OUTBOX_NOT_PUBLISHED":
-		// FAILED is intentionally excluded from the publisher's automatic PENDING scan,
-		// so the injected incident remains reproducible until an explicit retry action.
-		_, err = tx.Exec(ctx, `UPDATE payments.outbox_events SET publish_status='FAILED', published_at=NULL WHERE aggregate_id=$1`, orderID)
+		// Keep the business status PENDING; the demo switch blocks the publisher.
+		_, err = tx.Exec(ctx, `UPDATE payments.outbox_events SET publish_status='PENDING', published_at=NULL WHERE aggregate_id=$1`, orderID)
 		if err == nil {
 			err = restoreDemoStock(ctx, tx, orderID)
 		}
@@ -77,6 +76,9 @@ func (r *Repository) InjectDemoFault(ctx context.Context, orderID, faultType str
 		}
 	default:
 		return fmt.Errorf("unsupported demo fault type: %s", faultType)
+	}
+	if err == nil {
+		_, err = tx.Exec(ctx, `INSERT INTO agent.demo_faults(order_id,fault_type,enabled,cleared_at) VALUES($1,$2,true,NULL) ON CONFLICT(order_id) DO UPDATE SET fault_type=EXCLUDED.fault_type, enabled=true, cleared_at=NULL`, orderID, faultType)
 	}
 	if err != nil {
 		return err

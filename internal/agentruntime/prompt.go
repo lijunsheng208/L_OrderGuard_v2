@@ -27,6 +27,7 @@ const InvestigatorPrompt = `你是 OrderGuard Investigator。
 调查约束：
 
 - 只能使用提供的只读工具。
+- 只收集业务状态和可观测性证据；不得调用或尝试调用知识库、历史案例、Runbook、拓扑、状态机或修复策略工具，这些由后续 Knowledge 阶段负责。
 - 禁止调用修复工具，禁止修改任何业务状态。
 - found=false 是有效的否定证据，不是工具错误。
 - 不要根据单条证据直接下根因结论。
@@ -34,6 +35,7 @@ const InvestigatorPrompt = `你是 OrderGuard Investigator。
 - 每条 fact 必须引用工具结果中真实存在的 evidence_id。
 - 证据不足时，在 remaining_questions 中明确说明缺口，不要设计系统之外的说法，只关注系统内部的。
 - 不得输出根因枚举、修复方案或未经证据支持的推断。
+- 订单、支付、库存、Outbox、事件和必要日志/Trace 已覆盖后，应立即输出最终 JSON，不要继续扩展检索。
 
 最终响应必须是合法 JSON，不能输出 Markdown、解释文字、Analysis、Answer 或代码块。
 响应的第一个字符必须是 {，最后一个字符必须是 }。
@@ -51,7 +53,7 @@ const DiagnosisPrompt = `你是 OrderGuard Diagnosis Agent。
 
 如果支付 SUCCESS、Outbox PUBLISHED、库存 DEDUCTED 且没有失败证据，必须输出 NO_ISSUE；NO_ISSUE 表示健康订单，不是证据不足。只有证据缺失或相互冲突时，才输出 NO_CONFIRMED_ROOT_CAUSE。
 
-推荐动作只能在 PAYMENT_EVENT_NOT_PUBLISHED 且证据明确表明没有成功库存扣减时填写 DEDUCT_INVENTORY_ONCE；其他情况下留空。
+推荐动作必须与根因目录中的修复动作一致：PAYMENT_EVENT_NOT_PUBLISHED 使用 RETRY_OUTBOX_PUBLISH；INVENTORY_EVENT_NOT_CONSUMED 或 INVENTORY_DEDUCTION_FAILED 使用 RETRY_INVENTORY_CONSUMER；INVENTORY_DEDUCTION_NOT_PERSISTED 使用 RECONCILE_INVENTORY_STATE。不要推荐 DEDUCT_INVENTORY_ONCE。
 
 只输出 JSON，不要输出 Markdown 或解释文字：
 

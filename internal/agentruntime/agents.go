@@ -50,7 +50,7 @@ func (p *Planner) Run(ctx context.Context, run Run) (AgentOutput[Plan], error) {
 	}
 	input, err := json.Marshal(map[string]any{
 		"message": run.UserMessage, "order_id": run.OrderID,
-		"available_tools": p.registry.Definitions(),
+		"available_tools": p.registry.InvestigationDefinitions(),
 	})
 	if err != nil {
 		return AgentOutput[Plan]{}, fmt.Errorf("encode planner input: %w", err)
@@ -92,6 +92,9 @@ func (p *Planner) validatePlan(run Run, plan Plan) error {
 		registered, ok := p.registry.Get(step.Tool)
 		if !ok {
 			return fmt.Errorf("planner selected unavailable tool: %s", step.Tool)
+		}
+		if !isInvestigationTool(step.Tool) {
+			return fmt.Errorf("planner selected tool outside investigation stage: %s", step.Tool)
 		}
 		if err := mcpValidate(registered, step.Args); err != nil {
 			return fmt.Errorf("planner arguments for %s: %w", step.Tool, err)
