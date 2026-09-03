@@ -29,7 +29,17 @@ func NewHandler(repository *Repository, streams ...*eventbus.RedisStream) http.H
 	mux.HandleFunc("GET /payments/{id}", handler.get)
 	mux.HandleFunc("GET /events/{id}/payment-succeeded", handler.getEvent)
 	mux.HandleFunc("POST /outbox/{id}/retry", handler.retryOutbox)
+	mux.HandleFunc("POST /outbox/orders/{id}/rebuild", handler.rebuildOutbox)
 	return tracing.Middleware(mux)
+}
+
+func (h *Handler) rebuildOutbox(w http.ResponseWriter, request *http.Request) {
+	result, err := h.repository.RebuildOutbox(request.Context(), request.PathValue("id"))
+	if err != nil {
+		httpx.WriteError(w, 502, "OUTBOX_REBUILD_FAILED", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, result)
 }
 
 func (h *Handler) retryOutbox(w http.ResponseWriter, request *http.Request) {

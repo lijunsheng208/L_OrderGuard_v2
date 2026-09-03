@@ -80,6 +80,17 @@ func (h *Handler) deductOnce(w http.ResponseWriter, request *http.Request) {
 
 // getStatus 返回订单维度的库存处理状态。
 func (h *Handler) getStatus(w http.ResponseWriter, request *http.Request) {
+	if dirty, err := h.repository.DemoFaultEnabled(request.Context(), request.PathValue("id"), "TOOL_TIMEOUT_OR_DIRTY_DATA"); err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "QUERY_INVENTORY_FAILED", err.Error())
+		return
+	} else if dirty {
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
+			"order_id": request.PathValue("id"), "status": "CORRUPTED_UNKNOWN",
+			"successful_deduction_count": "not-a-number", "event_delivery_count": -1,
+			"data_quality": "DIRTY",
+		})
+		return
+	}
 	result, err := h.repository.GetOrderStatus(request.Context(), request.PathValue("id"))
 	if errors.Is(err, ErrOrderNotFound) {
 		httpx.WriteError(w, http.StatusNotFound, "ORDER_NOT_FOUND", err.Error())

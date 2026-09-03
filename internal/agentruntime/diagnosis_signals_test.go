@@ -65,3 +65,29 @@ func TestDiagnosticSignalsClassifyPersistenceConflict(t *testing.T) {
 		t.Fatalf("got %s", got.RootCause)
 	}
 }
+
+func TestDiagnosticSignalsRejectConflictingEvidence(t *testing.T) {
+	got := diagnoseSignals(
+		testEvidence("get_payment_status", map[string]any{"status": "SUCCESS"}),
+		testEvidence("get_inventory_status", map[string]any{"status": "NOT_DEDUCTED"}),
+		testEvidence("get_outbox_status", map[string]any{"publish_status": "PUBLISHED"}),
+		testEvidence("get_event_record", map[string]any{"found": true}),
+		testEvidence("get_trace", map[string]any{"service": "inventory-service", "operation": "deduct_inventory", "signals": []any{
+			map[string]any{"status": "OK", "message": "inventory deduction success"},
+			map[string]any{"status": "ERROR", "message": "inventory deduction rollback failed"},
+		}}),
+	)
+	if got.RootCause != "NO_CONFIRMED_ROOT_CAUSE" {
+		t.Fatalf("got %s", got.RootCause)
+	}
+}
+
+func TestDiagnosticSignalsRejectDirtyInventoryData(t *testing.T) {
+	got := diagnoseSignals(
+		testEvidence("get_payment_status", map[string]any{"status": "SUCCESS"}),
+		testEvidence("get_inventory_status", map[string]any{"status": "CORRUPTED_UNKNOWN", "data_quality": "DIRTY"}),
+	)
+	if got.RootCause != "NO_CONFIRMED_ROOT_CAUSE" {
+		t.Fatalf("got %s", got.RootCause)
+	}
+}

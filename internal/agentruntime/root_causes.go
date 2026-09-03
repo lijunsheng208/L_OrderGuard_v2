@@ -63,7 +63,7 @@ var RootCauseCatalog = []RootCauseDefinition{
 	{
 		Code:             "NO_CONFIRMED_ROOT_CAUSE",
 		Meaning:          "现有证据不足以确认任何根因，或不同证据之间存在冲突。",
-		SupportingSignal: "必须说明缺少哪些证据或哪些证据互相冲突。",
+		SupportingSignal: "必须说明缺少哪些证据或哪些证据互相冲突，例如同一库存操作同时出现成功与回滚，或工具返回无法解析的业务状态。",
 		Exclusion:        "不得推荐执行修复动作，confidence 不得超过 0.5。",
 	},
 }

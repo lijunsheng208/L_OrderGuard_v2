@@ -4,6 +4,7 @@ import "testing"
 
 func TestRepairActionForRootCause(t *testing.T) {
 	cases := map[string]string{
+		"PAYMENT_EVENT_NOT_CREATED":         "REBUILD_OUTBOX_EVENT",
 		"PAYMENT_EVENT_NOT_PUBLISHED":       "RETRY_OUTBOX_PUBLISH",
 		"INVENTORY_EVENT_NOT_CONSUMED":      "RETRY_INVENTORY_CONSUMER",
 		"INVENTORY_DEDUCTION_FAILED":        "RETRY_INVENTORY_CONSUMER",
@@ -25,6 +26,7 @@ func TestRemediationArgumentsMatchToolSchemas(t *testing.T) {
 		action string
 		keys   []string
 	}{
+		{"REBUILD_OUTBOX_EVENT", []string{"order_id"}},
 		{"RETRY_OUTBOX_PUBLISH", []string{"event_id"}},
 		{"RETRY_INVENTORY_CONSUMER", []string{"event_id"}},
 		{"RETRY_INVENTORY_DEDUCTION", []string{"order_id", "items", "idempotency_key"}},

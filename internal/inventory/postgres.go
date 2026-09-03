@@ -38,7 +38,7 @@ func (r *Repository) RetryEvent(ctx context.Context, eventID string) ([]Deductio
 	if err != nil {
 		return nil, err
 	}
-	if _, err := r.db.Exec(ctx, `UPDATE agent.demo_faults SET enabled=false, cleared_at=now() WHERE order_id=$1 AND fault_type IN ('INVENTORY_CONSUMER_FAILED','INVENTORY_DEDUCTION_NOT_PERSISTED')`, event.AggregateID); err != nil {
+	if _, err := r.db.Exec(ctx, `UPDATE agent.demo_faults SET enabled=false, cleared_at=now() WHERE order_id=$1 AND fault_type IN ('INVENTORY_EVENT_NOT_CONSUMED','INVENTORY_CONSUMER_FAILED','INVENTORY_DEDUCTION_NOT_PERSISTED')`, event.AggregateID); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -127,12 +127,23 @@ func (r *Repository) consume(ctx context.Context, event payment.Event, bypassDem
 		return nil, errors.New("invalid payment event")
 	}
 	if !bypassDemoFault {
-		var blocked bool
-		if err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM agent.demo_faults WHERE order_id=$1 AND enabled AND fault_type IN ('INVENTORY_CONSUMER_FAILED','INVENTORY_DEDUCTION_NOT_PERSISTED'))`, event.AggregateID).Scan(&blocked); err != nil {
+		var faultType string
+		if err := r.db.QueryRow(ctx, `SELECT COALESCE((SELECT fault_type FROM agent.demo_faults WHERE order_id=$1 AND enabled), '')`, event.AggregateID).Scan(&faultType); err != nil {
 			return nil, err
 		}
-		if blocked {
-			return nil, errors.New("demo inventory consumer fault is enabled")
+		switch faultType {
+		case "INVENTORY_EVENT_NOT_CONSUMED":
+			return nil, errors.New("demo inventory event consumption is paused")
+		case "INVENTORY_CONSUMER_FAILED":
+			_ = r.recordDemoSignal(ctx, event, "consume_payment_event", "ERROR", "inventory consumer failed while processing payment event")
+			return nil, errors.New("demo inventory consumer failed")
+		case "INVENTORY_DEDUCTION_NOT_PERSISTED":
+			_ = r.recordDemoSignal(ctx, event, "deduct_inventory", "OK", "inventory deduction reported success but transaction was not persisted")
+			return nil, errors.New("demo inventory deduction persistence failed")
+		case "EVIDENCE_CONFLICT":
+			_ = r.recordDemoSignal(ctx, event, "deduct_inventory", "OK", "inventory deduction reported success")
+			_ = r.recordDemoSignal(ctx, event, "deduct_inventory", "ERROR", "inventory deduction reported rollback")
+			return nil, errors.New("demo conflicting inventory evidence")
 		}
 	}
 	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{})
@@ -250,6 +261,21 @@ func (r *Repository) consume(ctx context.Context, event payment.Event, bypassDem
 		return nil, fmt.Errorf("commit inventory deduction: %w", err)
 	}
 	return result, nil
+}
+
+func (r *Repository) recordDemoSignal(ctx context.Context, event payment.Event, operation, status, message string) error {
+	traceID := event.TraceID
+	if traceID == "" {
+		traceID = tracing.NewID()
+	}
+	_, err := r.db.Exec(ctx, `INSERT INTO observability.signals(trace_id,order_id,service_name,signal_type,operation,status,message,attributes,started_at,finished_at) VALUES($1,$2,'inventory-service','LOG',$3,$4,$5,jsonb_build_object('event_id',$6),now(),now())`, traceID, event.AggregateID, operation, status, message, event.EventID)
+	return err
+}
+
+func (r *Repository) DemoFaultEnabled(ctx context.Context, orderID, faultType string) (bool, error) {
+	var enabled bool
+	err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM agent.demo_faults WHERE order_id=$1 AND fault_type=$2 AND enabled)`, orderID, faultType).Scan(&enabled)
+	return enabled, err
 }
 
 // GetOrderStatus 返回已存在订单的库存扣减汇总。

@@ -200,8 +200,8 @@ func TestProfilesKeepWriteToolIsolated(t *testing.T) {
 			}
 		}
 	}
-	if len(profiles["remediation"].Tools) != 5 {
-		t.Fatal("remediation-mcp must expose five phase 5 tools")
+	if len(profiles["remediation"].Tools) != 6 {
+		t.Fatal("remediation-mcp must expose six repair tools")
 	}
 }
 

@@ -9,6 +9,8 @@ import (
 // RepairActionForRootCause maps only confirmed, executable causes to actions.
 func RepairActionForRootCause(rootCause string) (string, bool) {
 	switch rootCause {
+	case "PAYMENT_EVENT_NOT_CREATED":
+		return "REBUILD_OUTBOX_EVENT", true
 	case "PAYMENT_EVENT_NOT_PUBLISHED":
 		return "RETRY_OUTBOX_PUBLISH", true
 	case "INVENTORY_EVENT_NOT_CONSUMED":
@@ -26,6 +28,8 @@ func RepairActionForRootCause(rootCause string) (string, bool) {
 
 func remediationToolForAction(action string) string {
 	switch action {
+	case "REBUILD_OUTBOX_EVENT":
+		return "rebuild_outbox_event"
 	case "RETRY_OUTBOX_PUBLISH":
 		return "retry_outbox_publish"
 	case "RETRY_INVENTORY_CONSUMER":
@@ -53,9 +57,9 @@ func remediationArguments(action, orderID, eventID, idempotencyKey string, items
 			return nil, errors.New("RETRY_INVENTORY_DEDUCTION requires order_id, items and idempotency_key")
 		}
 		return map[string]any{"order_id": orderID, "items": items, "idempotency_key": idempotencyKey}, nil
-	case "RECONCILE_INVENTORY_STATE":
+	case "REBUILD_OUTBOX_EVENT", "RECONCILE_INVENTORY_STATE":
 		if orderID == "" {
-			return nil, errors.New("RECONCILE_INVENTORY_STATE requires order_id")
+			return nil, fmt.Errorf("%s requires order_id", action)
 		}
 		return map[string]any{"order_id": orderID}, nil
 	default:

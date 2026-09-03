@@ -39,6 +39,7 @@ func Handlers(inventoryURL string, paymentURLs ...string) map[string]mcp.ToolHan
 	result["reconcile_inventory_state"] = inventoryAction(client, inventoryURL, "/inventory/%s/reconcile")
 	if len(paymentURLs) > 0 {
 		result["retry_outbox_publish"] = inventoryAction(client, paymentURLs[0], "/outbox/%s/retry")
+		result["rebuild_outbox_event"] = inventoryAction(client, paymentURLs[0], "/outbox/orders/%s/rebuild")
 	}
 	return result
 }

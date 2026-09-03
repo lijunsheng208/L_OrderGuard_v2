@@ -42,38 +42,28 @@ func (r *Repository) InjectDemoFault(ctx context.Context, orderID, faultType str
 		return ErrRunNotFound
 	}
 	switch faultType {
-	case "OUTBOX_NOT_PUBLISHED":
+	case "NO_ISSUE":
+		_, err = tx.Exec(ctx, `DELETE FROM agent.demo_faults WHERE order_id=$1`, orderID)
+		if err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	case "OUTBOX_NOT_CREATED":
+		err = resetDemoInventory(ctx, tx, orderID)
+		if err == nil {
+			_, err = tx.Exec(ctx, `DELETE FROM payments.outbox_events WHERE aggregate_id=$1`, orderID)
+		}
+	case "OUTBOX_NOT_PUBLISHED", "OUTBOX_PUBLISH_FAILED":
 		// Keep the business status PENDING; the demo switch blocks the publisher.
 		_, err = tx.Exec(ctx, `UPDATE payments.outbox_events SET publish_status='PENDING', published_at=NULL WHERE aggregate_id=$1`, orderID)
 		if err == nil {
-			err = restoreDemoStock(ctx, tx, orderID)
+			err = resetDemoInventory(ctx, tx, orderID)
 		}
-		if err == nil {
-			_, err = tx.Exec(ctx, `DELETE FROM inventory.deductions WHERE order_id=$1`, orderID)
-		}
-		if err == nil {
-			_, err = tx.Exec(ctx, `DELETE FROM inventory.consumed_events WHERE event_id IN (SELECT event_id FROM payments.outbox_events WHERE aggregate_id=$1)`, orderID)
-		}
-	case "INVENTORY_CONSUMER_FAILED":
-		if err = restoreDemoStock(ctx, tx, orderID); err == nil {
-			_, err = tx.Exec(ctx, `DELETE FROM inventory.deductions WHERE order_id=$1`, orderID)
-		}
-		if err == nil {
-			_, err = tx.Exec(ctx, `DELETE FROM inventory.consumed_events WHERE event_id IN (SELECT event_id FROM payments.outbox_events WHERE aggregate_id=$1)`, orderID)
-		}
-		if err == nil {
-			_, err = tx.Exec(ctx, `INSERT INTO observability.signals (trace_id, order_id, service_name, signal_type, operation, status, message, attributes, started_at, finished_at) VALUES ($1,$2,'inventory-service','LOG','consume_payment_event','ERROR','inventory consumer failed', '{}'::jsonb, now(), now())`, "trace-demo-failure-"+orderID, orderID)
-		}
-	case "INVENTORY_DEDUCTION_NOT_PERSISTED":
-		if err = restoreDemoStock(ctx, tx, orderID); err == nil {
-			_, err = tx.Exec(ctx, `DELETE FROM inventory.deductions WHERE order_id=$1`, orderID)
-		}
-		if err == nil {
-			_, err = tx.Exec(ctx, `DELETE FROM inventory.consumed_events WHERE event_id IN (SELECT event_id FROM payments.outbox_events WHERE aggregate_id=$1)`, orderID)
-		}
-		if err == nil {
-			_, err = tx.Exec(ctx, `INSERT INTO observability.signals (trace_id, order_id, service_name, signal_type, operation, status, message, attributes, started_at, finished_at) VALUES ($1,$2,'inventory-service','LOG','deduct_inventory','OK','payment event consumed and inventory deducted', '{"deduction_count":1}'::jsonb, now(), now())`, "trace-demo-persist-"+orderID, orderID)
-		}
+	case "INVENTORY_EVENT_NOT_CONSUMED", "INVENTORY_CONSUMER_FAILED", "INVENTORY_DEDUCTION_NOT_PERSISTED", "EVIDENCE_CONFLICT":
+		err = resetDemoInventory(ctx, tx, orderID)
+	case "TOOL_TIMEOUT_OR_DIRTY_DATA":
+		// The underlying business chain remains healthy. The inventory query
+		// adapter exposes a deliberately malformed semantic status for this order.
 	default:
 		return fmt.Errorf("unsupported demo fault type: %s", faultType)
 	}
@@ -84,6 +74,17 @@ func (r *Repository) InjectDemoFault(ctx context.Context, orderID, faultType str
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func resetDemoInventory(ctx context.Context, tx pgx.Tx, orderID string) error {
+	if err := restoreDemoStock(ctx, tx, orderID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM inventory.deductions WHERE order_id=$1`, orderID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `DELETE FROM inventory.consumed_events WHERE event_id IN (SELECT event_id FROM payments.outbox_events WHERE aggregate_id=$1)`, orderID)
+	return err
 }
 
 func restoreDemoStock(ctx context.Context, tx pgx.Tx, orderID string) error {

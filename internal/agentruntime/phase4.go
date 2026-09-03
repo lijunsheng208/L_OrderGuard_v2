@@ -40,7 +40,7 @@ func (o *Orchestrator) RunDiagnosisAgent(ctx context.Context, run Run, investiga
 	}
 	// Keep the model's explanation fields, but let strong structured evidence own
 	// the root-cause classification.
-	if expected := deterministicDiagnosis(evidence); expected.Confidence >= 0.78 {
+	if expected := deterministicDiagnosis(evidence); expected.Confidence >= 0.78 || evidenceRequiresInconclusive(evidence) {
 		result.RootCause = expected.RootCause
 		result.Confidence = expected.Confidence
 		result.EvidenceIDs = expected.EvidenceIDs
@@ -315,6 +315,7 @@ func (o *Orchestrator) DiagnoseFromEvidence(ctx context.Context, run Run) (Diagn
 
 type diagnosticSignals struct {
 	hasInventory, hasPayment, hasOutbox, paymentSuccess, inventoryDeducted, inventoryNotDeducted bool
+	dirtyData                                                                                    bool
 	outboxStatus                                                                                 string
 	outboxFound, eventFound                                                                      *bool
 	consumerReceived, consumerSuccess, consumerFailure                                           bool
@@ -334,6 +335,9 @@ func (s *diagnosticSignals) observe(item Evidence) {
 		}
 		if v == "NOT_DEDUCTED" {
 			s.inventoryNotDeducted = true
+		}
+		if v != "DEDUCTED" && v != "NOT_DEDUCTED" || stringValue(data, "data_quality") == "DIRTY" {
+			s.dirtyData = true
 		}
 	case "get_payment_status":
 		s.hasPayment = true
@@ -371,6 +375,10 @@ func stringValue(data map[string]any, key string) string {
 
 func (s diagnosticSignals) diagnosis(ids []string) Diagnosis {
 	d := Diagnosis{RootCause: "NO_CONFIRMED_ROOT_CAUSE", Confidence: 0.35, EvidenceIDs: ids}
+	if s.dirtyData || s.consumerSuccess && s.consumerFailure {
+		d.Confidence = 0.4
+		return d
+	}
 	if s.paymentSuccess && s.inventoryDeducted && s.hasOutbox && s.outboxStatus == "PUBLISHED" {
 		d.RootCause, d.Confidence = "NO_ISSUE", 0.95
 		return d
@@ -400,6 +408,14 @@ func (s diagnosticSignals) diagnosis(ids []string) Diagnosis {
 	return d
 }
 
+func evidenceRequiresInconclusive(evidence []Evidence) bool {
+	signals := diagnosticSignals{}
+	for _, item := range evidence {
+		signals.observe(item)
+	}
+	return signals.dirtyData || signals.consumerSuccess && signals.consumerFailure
+}
+
 // CriticReview 校验诊断证据引用和允许的根因枚举。
 func (o *Orchestrator) CriticReview(ctx context.Context, runID string, diagnosis Diagnosis) error {
 	evidence, err := o.repository.ListEvidence(ctx, runID)
@@ -426,7 +442,7 @@ func (o *Orchestrator) CriticReview(ctx context.Context, runID string, diagnosis
 		expected := signals.diagnosis(nil)
 		// A deterministic, high-confidence classification must not be overridden by
 		// a model conclusion that contradicts the observed state machine.
-		if expected.Confidence >= 0.78 && diagnosis.RootCause != expected.RootCause {
+		if (expected.Confidence >= 0.78 || evidenceRequiresInconclusive(evidence)) && diagnosis.RootCause != expected.RootCause {
 			return fmt.Errorf("critic rejected diagnosis: expected %s from evidence, got %s", expected.RootCause, diagnosis.RootCause)
 		}
 	}

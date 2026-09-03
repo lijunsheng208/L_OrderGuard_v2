@@ -122,23 +122,45 @@ func (r *Repository) Pay(
 	if err != nil {
 		return Payment{}, fmt.Errorf("encode payment event: %w", err)
 	}
-	_, err = tx.Exec(ctx, `
-		INSERT INTO payments.outbox_events
-			(event_id, aggregate_id, event_type, payload, publish_status)
-		VALUES ($1, $2, $3, $4, 'PENDING')`,
-		event.EventID, event.AggregateID, event.EventType, payload,
-	)
-	if err != nil {
-		return Payment{}, fmt.Errorf("insert outbox event: %w", err)
+	var demoFault string
+	if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT fault_type FROM agent.demo_faults WHERE order_id=$1 AND enabled), '')`, orderID).Scan(&demoFault); err != nil {
+		return Payment{}, fmt.Errorf("query demo outbox fault: %w", err)
+	}
+	suppressOutbox := demoFault == "OUTBOX_NOT_CREATED"
+	if !suppressOutbox {
+		_, err = tx.Exec(ctx, `
+			INSERT INTO payments.outbox_events
+				(event_id, aggregate_id, event_type, payload, publish_status)
+			VALUES ($1, $2, $3, $4, 'PENDING')`,
+			event.EventID, event.AggregateID, event.EventType, payload,
+		)
+		if err != nil {
+			return Payment{}, fmt.Errorf("insert outbox event: %w", err)
+		}
+	}
+	message := "payment committed and outbox event created"
+	if suppressOutbox {
+		message = "payment committed but outbox event creation failed"
 	}
 	if err := telemetry.RecordTx(ctx, tx, telemetry.Signal{
 		TraceID: traceID, OrderID: orderID, Service: "payment-service",
 		Type: "LOG", Operation: "commit_payment", Status: "OK",
-		Message:    "payment committed and outbox event created",
-		Attributes: map[string]any{"payment_id": paymentID, "event_id": event.EventID},
+		Message:    message,
+		Attributes: map[string]any{"payment_id": paymentID, "event_id": event.EventID, "outbox_created": !suppressOutbox},
 		StartedAt:  now, FinishedAt: time.Now().UTC(),
 	}); err != nil {
 		return Payment{}, err
+	}
+	if demoFault == "OUTBOX_PUBLISH_FAILED" || demoFault == "OUTBOX_NOT_PUBLISHED" {
+		if err := telemetry.RecordTx(ctx, tx, telemetry.Signal{
+			TraceID: traceID, OrderID: orderID, Service: "payment-service",
+			Type: "LOG", Operation: "publish_outbox", Status: "ERROR",
+			Message:    "outbox relay failed before publishing event",
+			Attributes: map[string]any{"event_id": event.EventID, "retryable": true},
+			StartedAt:  now, FinishedAt: time.Now().UTC(),
+		}); err != nil {
+			return Payment{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Payment{}, fmt.Errorf("commit payment: %w", err)
@@ -228,7 +250,7 @@ func (r *Repository) PublishPending(
 	published := 0
 	for _, item := range events {
 		var blocked bool
-		if err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM agent.demo_faults WHERE order_id=$1 AND fault_type='OUTBOX_NOT_PUBLISHED' AND enabled)`, item.AggregateID).Scan(&blocked); err != nil {
+		if err := r.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM agent.demo_faults WHERE order_id=$1 AND fault_type IN ('OUTBOX_NOT_PUBLISHED','OUTBOX_PUBLISH_FAILED') AND enabled)`, item.AggregateID).Scan(&blocked); err != nil {
 			return published, err
 		}
 		if blocked {
@@ -283,13 +305,53 @@ func (r *Repository) RetryOutbox(ctx context.Context, stream *eventbus.RedisStre
 	if err := json.Unmarshal(payload, &item.Event); err != nil {
 		return OutboxEvent{}, err
 	}
-	_, _ = r.db.Exec(ctx, `UPDATE agent.demo_faults SET enabled=false, cleared_at=now() WHERE order_id=$1 AND fault_type='OUTBOX_NOT_PUBLISHED'`, item.AggregateID)
+	_, _ = r.db.Exec(ctx, `UPDATE agent.demo_faults SET enabled=false, cleared_at=now() WHERE order_id=$1 AND fault_type IN ('OUTBOX_NOT_PUBLISHED','OUTBOX_PUBLISH_FAILED')`, item.AggregateID)
 	if err := stream.Publish(ctx, item.EventID, item.Event); err != nil {
 		return OutboxEvent{}, err
 	}
 	_, err = r.db.Exec(ctx, `UPDATE payments.outbox_events SET publish_status='PUBLISHED', attempts=attempts+1, published_at=now() WHERE event_id=$1`, eventID)
 	item.PublishStatus, item.Attempts = "PUBLISHED", item.Attempts+1
 	return item, err
+}
+
+// RebuildOutbox reconstructs a missing payment.succeeded event from committed
+// payment and order data. It never trusts payload supplied by the caller.
+func (r *Repository) RebuildOutbox(ctx context.Context, orderID string) (OutboxEvent, error) {
+	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return OutboxEvent{}, err
+	}
+	defer tx.Rollback(ctx)
+	paymentRecord, found, err := getPaymentTx(ctx, tx, orderID)
+	if err != nil {
+		return OutboxEvent{}, err
+	}
+	if !found || paymentRecord.Status != Success {
+		return OutboxEvent{}, errors.New("successful payment is required to rebuild outbox")
+	}
+	items, err := getOrderItemsTx(ctx, tx, orderID)
+	if err != nil {
+		return OutboxEvent{}, err
+	}
+	event := Event{
+		EventID: "evt_" + paymentRecord.ID, EventType: "payment.succeeded",
+		AggregateID: orderID, OccurredAt: paymentRecord.PaidAt,
+		Producer: "payment-service", TraceID: tracing.ID(ctx), Data: paymentRecord, Items: items,
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return OutboxEvent{}, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO payments.outbox_events(event_id,aggregate_id,event_type,payload,publish_status) VALUES($1,$2,$3,$4,'PENDING') ON CONFLICT(event_id) DO NOTHING`, event.EventID, orderID, event.EventType, payload); err != nil {
+		return OutboxEvent{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE agent.demo_faults SET enabled=false, cleared_at=now() WHERE order_id=$1 AND fault_type='OUTBOX_NOT_CREATED'`, orderID); err != nil {
+		return OutboxEvent{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return OutboxEvent{}, err
+	}
+	return OutboxEvent{Event: event, PublishStatus: "PENDING", Attempts: 0}, nil
 }
 
 // getPaymentTx 在支付事务中查询已有支付。

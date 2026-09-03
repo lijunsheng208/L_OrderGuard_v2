@@ -78,6 +78,7 @@ func Profiles() map[string]ServerProfile {
 			Name:    "remediation-mcp",
 			Version: "0.1.0",
 			Tools: []Tool{
+				writeTool("rebuild_outbox_event", "根据已提交支付和订单数据重建缺失的 Outbox 事件", objectSchema(fields{"order_id": stringField("订单 ID")}, "order_id")),
 				writeTool("deduct_inventory_once", "经 Runtime 授权后执行一次库存扣减", objectSchema(fields{
 					"order_id": stringField("订单 ID"),
 					"items": arrayField("待扣减商品", map[string]any{
