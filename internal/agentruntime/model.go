@@ -79,6 +79,17 @@ type Evidence struct {
 	CreatedAt   time.Time       `json:"created_at"`
 }
 
+// ApprovalRecord 表示用户对诊断结论或修复动作的一次审批记录。
+type ApprovalRecord struct {
+	ID         string    `json:"approval_id"`
+	RunID      string    `json:"run_id"`
+	Type       string    `json:"type"`
+	Decision   string    `json:"decision"`
+	Conclusion string    `json:"conclusion"`
+	NextStatus Status    `json:"next_status"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 // Event 表示可重放的调查进度事件。
 type Event struct {
 	ID        int64           `json:"id"`

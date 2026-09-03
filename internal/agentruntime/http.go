@@ -30,6 +30,7 @@ func NewHandler(repository *Repository, orchestrator *Orchestrator) http.Handler
 	mux.HandleFunc("GET /api/v1/investigations/{id}", handler.getRun)
 	mux.HandleFunc("GET /api/v1/investigations/{id}/steps", handler.getSteps)
 	mux.HandleFunc("GET /api/v1/investigations/{id}/evidence", handler.getEvidence)
+	mux.HandleFunc("GET /api/v1/investigations/{id}/approvals", handler.getApprovals)
 	mux.HandleFunc("GET /api/v1/investigations/{id}/events", handler.streamEvents)
 	mux.HandleFunc("POST /api/v1/investigations/{id}/approve", handler.approveRun)
 	mux.HandleFunc("POST /api/v1/investigations/{id}/execute", handler.executeRun)
@@ -39,7 +40,10 @@ func NewHandler(repository *Repository, orchestrator *Orchestrator) http.Handler
 // cors 处理本地 React 控制台的跨域预检请求。
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:5173")
+		origin := r.Header.Get("Origin")
+		if strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "http://127.0.0.1:") {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
 		w.Header().Set("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID, X-Trace-ID")
@@ -131,7 +135,7 @@ func (h *Handler) executeRun(w http.ResponseWriter, request *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, run)
 }
 
-// approveRun 将通过策略检查的调查任务置为等待执行审批。
+// approveRun 审批诊断结论；健康订单直接结束，异常订单进入修复执行准备。
 func (h *Handler) approveRun(w http.ResponseWriter, request *http.Request) {
 	run, err := h.repository.GetRun(request.Context(), request.PathValue("id"))
 	if errors.Is(err, ErrRunNotFound) {
@@ -146,6 +150,31 @@ func (h *Handler) approveRun(w http.ResponseWriter, request *http.Request) {
 		httpx.WriteError(w, http.StatusConflict, "POLICY_REJECTED", "investigation is not ready for approval")
 		return
 	}
+	var result InvestigationResult
+	if err := json.Unmarshal(run.FinalSummary, &result); err != nil || result.Diagnosis == nil {
+		httpx.WriteError(w, http.StatusConflict, "DIAGNOSIS_REQUIRED", "investigation diagnosis is unavailable")
+		return
+	}
+	if result.Diagnosis.RootCause == "NO_ISSUE" {
+		record, err := h.repository.SaveApprovalRecord(request.Context(), run.ID, "NO_ISSUE_CONFIRMATION", "APPROVED", result.Diagnosis.RootCause, StatusNoAnomaly)
+		if err != nil {
+			httpx.WriteError(w, http.StatusInternalServerError, "APPROVAL_RECORD_FAILED", err.Error())
+			return
+		}
+		if err := h.repository.Transition(request.Context(), &run, StatusNoAnomaly, "approval.completed", map[string]any{
+			"approval_id": record.ID, "type": record.Type, "decision": record.Decision,
+			"conclusion": record.Conclusion, "next_status": record.NextStatus,
+		}); err != nil {
+			httpx.WriteError(w, http.StatusConflict, "APPROVAL_FAILED", err.Error())
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, run)
+		return
+	}
+	if result.Diagnosis.RecommendedAction == "" {
+		httpx.WriteError(w, http.StatusConflict, "REPAIR_ACTION_REQUIRED", "diagnosis has no approved repair action")
+		return
+	}
 	if err := h.repository.Transition(request.Context(), &run, StatusPolicyCheck, "policy.checked", map[string]any{"approved": true}); err != nil {
 		httpx.WriteError(w, http.StatusConflict, "POLICY_REJECTED", err.Error())
 		return
@@ -154,7 +183,31 @@ func (h *Handler) approveRun(w http.ResponseWriter, request *http.Request) {
 		httpx.WriteError(w, http.StatusConflict, "APPROVAL_FAILED", err.Error())
 		return
 	}
+	if _, err := h.repository.SaveApprovalRecord(request.Context(), run.ID, "REPAIR_APPROVAL", "APPROVED", result.Diagnosis.RootCause, StatusAwaitingApproval); err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "APPROVAL_RECORD_FAILED", err.Error())
+		return
+	}
+	_, _ = h.repository.AppendEvent(request.Context(), run.ID, "approval.completed", map[string]any{
+		"type": "REPAIR_APPROVAL", "decision": "APPROVED", "next_status": StatusAwaitingApproval,
+	})
 	httpx.WriteJSON(w, http.StatusOK, run)
+}
+
+// getApprovals 返回指定调查的审批历史。
+func (h *Handler) getApprovals(w http.ResponseWriter, request *http.Request) {
+	if _, err := h.repository.GetRun(request.Context(), request.PathValue("id")); errors.Is(err, ErrRunNotFound) {
+		httpx.WriteError(w, http.StatusNotFound, "RUN_NOT_FOUND", ErrRunNotFound.Error())
+		return
+	} else if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "QUERY_RUN_FAILED", err.Error())
+		return
+	}
+	records, err := h.repository.ListApprovalRecords(request.Context(), request.PathValue("id"))
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "QUERY_APPROVALS_FAILED", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"approvals": records})
 }
 
 // health 返回 Runtime 存活状态和模型配置状态。

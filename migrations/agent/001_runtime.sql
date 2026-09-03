@@ -94,6 +94,18 @@ CREATE INDEX IF NOT EXISTS repair_plans_run_idx ON agent.repair_plans (run_id, c
 CREATE INDEX IF NOT EXISTS repair_executions_run_idx ON agent.repair_executions (run_id, started_at);
 CREATE INDEX IF NOT EXISTS verification_results_run_idx ON agent.verification_results (run_id, created_at);
 
+CREATE TABLE IF NOT EXISTS agent.approval_records (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES agent.investigation_runs(id) ON DELETE CASCADE,
+    approval_type TEXT NOT NULL CHECK (approval_type IN ('NO_ISSUE_CONFIRMATION', 'REPAIR_APPROVAL')),
+    decision TEXT NOT NULL CHECK (decision IN ('APPROVED', 'REJECTED')),
+    conclusion TEXT NOT NULL,
+    next_status TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS approval_records_run_idx ON agent.approval_records (run_id, created_at);
+
 CREATE TABLE IF NOT EXISTS agent.investigation_events (
     id BIGSERIAL PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES agent.investigation_runs(id) ON DELETE CASCADE,

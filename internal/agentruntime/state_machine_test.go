@@ -29,6 +29,9 @@ func TestValidateTransition(t *testing.T) {
 	if err := ValidateTransition(StatusCreated, StatusEvidenceCollected); err == nil {
 		t.Fatal("invalid transition was accepted")
 	}
+	if err := ValidateTransition(StatusEvidenceCollected, StatusNoAnomaly); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestToolGuardEnforcesOrderAndBudgets 验证订单边界、重复次数和总调用预算。

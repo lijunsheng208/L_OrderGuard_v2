@@ -1,14 +1,66 @@
 import { FormEvent, useEffect, useState } from 'react'
+import {
+  BookOpen, Check, CircleAlert, ClipboardList, RefreshCw, Search,
+  SearchCheck, ShieldCheck, Stethoscope, type LucideIcon,
+} from 'lucide-react'
 import * as api from './api'
 
-const stages = ['PLANNING','INVESTIGATING','KNOWLEDGE_LOOKUP','DIAGNOSING','CRITIC_REVIEW','EVIDENCE_COLLECTED','POLICY_CHECK','AWAITING_APPROVAL','EXECUTING','VERIFYING','REPAIRED']
+const statusText: Record<string, string> = {
+  CREATED: '已创建', PLANNING: '正在规划', INVESTIGATING: '正在调查', KNOWLEDGE_LOOKUP: '正在检索知识',
+  DIAGNOSING: '正在诊断', CRITIC_REVIEW: '正在审查', EVIDENCE_COLLECTED: '等待处理', NO_ANOMALY: '链路正常',
+  POLICY_CHECK: '正在检查策略', AWAITING_APPROVAL: '等待执行', EXECUTING: '正在执行修复', VERIFYING: '正在验证',
+  REPAIRED: '修复完成', REJECTED: '已拒绝', EXECUTION_FAILED: '执行失败', VERIFICATION_FAILED: '验证失败',
+  INVESTIGATION_FAILED: '调查失败', INCONCLUSIVE: '结论不确定',
+}
+
+const agentPath: { key: string; label: string; icon: LucideIcon }[] = [
+  { key: 'PLANNER', label: 'Planner', icon: ClipboardList },
+  { key: 'INVESTIGATOR', label: 'Investigator', icon: SearchCheck },
+  { key: 'KNOWLEDGE', label: 'Knowledge', icon: BookOpen },
+  { key: 'DIAGNOSIS', label: 'Diagnosis', icon: Stethoscope },
+  { key: 'CRITIC', label: 'Critic', icon: ShieldCheck },
+]
+const statusAgent: Record<string, string> = { PLANNING: 'PLANNER', INVESTIGATING: 'INVESTIGATOR', KNOWLEDGE_LOOKUP: 'KNOWLEDGE', DIAGNOSING: 'DIAGNOSIS', CRITIC_REVIEW: 'CRITIC' }
+
+function AgentProgress({ steps, status }: { steps: api.Step[]; status?: string }) {
+  const completed = new Set(steps.filter(step => step.status === 'SUCCEEDED').map(step => step.agent_type))
+  const failed = new Set(steps.filter(step => step.status === 'FAILED').map(step => step.agent_type))
+  const current = status ? statusAgent[status] : undefined
+  return <section className="section-block"><div className="section-head"><div><h2>Agent Path</h2><p>Investigation workflow</p></div><span className="status-badge">{status ? statusText[status] || status : '未开始'}</span></div><div className="agent-path">{agentPath.map(({ key, label, icon: Icon }, index) => { const done = completed.has(key); const isFailed = failed.has(key); const active = current === key; return <div className={`agent-node ${done ? 'done' : ''} ${active ? 'active' : ''} ${isFailed ? 'failed' : ''}`} key={key}><div className="agent-icon">{done ? <Check size={18} /> : isFailed ? <CircleAlert size={18} /> : <Icon size={18} />}</div><div><strong>{label}</strong><small>{done ? 'Completed' : isFailed ? 'Failed' : active ? 'Running' : 'Pending'}</small></div>{index < agentPath.length - 1 && <span className="agent-line" />}</div> })}</div></section>
+}
+
 export function App() {
-  const [message,setMessage]=useState('调查订单 O1001 的支付和库存链路'),[orderId,setOrderId]=useState('O1001'),[run,setRun]=useState<api.Run>(),[events,setEvents]=useState<api.TimelineEvent[]>([]),[steps,setSteps]=useState<api.Step[]>([]),[evidence,setEvidence]=useState<api.Evidence[]>([]),[error,setError]=useState(''),[sku,setSku]=useState('SKU1'),[qty,setQty]=useState(1),[key,setKey]=useState('repair-'+Date.now())
-  const refresh=async()=>{if(!run)return;try{const [r,s,e]=await Promise.all([api.getRun(run.run_id),api.getSteps(run.run_id),api.getEvidence(run.run_id)]);setRun(r);setSteps(s.steps);setEvidence(e.evidence)}catch(e){setError((e as Error).message)}}
-  useEffect(()=>{if(!run)return;const stop=api.subscribe(run.run_id,e=>{setEvents(x=>[...x,e]);refresh()});return stop},[run?.run_id])
-  const start=async(e:FormEvent)=>{e.preventDefault();setError('');try{const r=await api.createInvestigation(message,orderId);setRun(r);setEvents([]);setSteps([]);setEvidence([])}catch(e){setError((e as Error).message)}}
-  const approve=async()=>{if(!run)return;try{setRun(await api.approveRun(run.run_id));await refresh()}catch(e){setError((e as Error).message)}}
-  const execute=async()=>{if(!run)return;try{setRun(await api.executeRun(run.run_id,[{sku_id:sku,quantity:qty}],key));await refresh()}catch(e){setError((e as Error).message)}}
-  const diagnosis=run?.final_summary?.diagnosis
-  return <><header><div className="brand"><span className="mark">OG</span><div><strong>OrderGuard</strong><small>incident control room</small></div></div><span className="online"><i/>runtime connected</span></header><main><section className="hero"><div><p className="eyebrow">ORDER INVESTIGATION</p><h1>Trace the break.<br/><em>Protect the fix.</em></h1><p className="lede">沿着订单、支付、库存和事件流的证据链，定位异常并验证修复。</p></div><form onSubmit={start}><label>调查问题</label><textarea value={message} onChange={e=>setMessage(e.target.value)}/><label>订单号</label><input value={orderId} onChange={e=>setOrderId(e.target.value)}/><button>开始调查 <b>↗</b></button></form></section>{error&&<div className="error">{error}</div>}{run&&<section className="workspace"><div className="runbar"><code>{run.run_id}</code><span className="state">{run.status}</span><button className="quiet" onClick={refresh}>刷新</button></div><div className="stagebar">{stages.map(s=><span className={stages.indexOf(s)<=stages.indexOf(run.status)?'done':''} key={s}>{s}</span>)}</div><div className="columns"><article className="panel"><div className="paneltitle"><h2>Live timeline</h2><small>{events.length} events</small></div>{events.length?events.map((e,i)=><div className="event" key={i}><time>{new Date(e.created_at||'').toLocaleTimeString()}</time><div><b>{e.type}</b><code>{JSON.stringify(e.payload)}</code></div></div>):<p className="muted">等待 Agent 事件...</p>}</article><article className="panel"><div className="paneltitle"><h2>Diagnosis</h2>{diagnosis&&<span className="confidence">{Math.round(diagnosis.confidence*100)}%</span>}</div>{diagnosis?<><h3 className="cause">{diagnosis.root_cause}</h3><p className="muted">证据：{diagnosis.evidence_ids.join(', ')}</p>{diagnosis.recommended_action&&<span className="tag">{diagnosis.recommended_action}</span>}</>:<p className="muted">等待 Diagnosis Agent 输出...</p>}{run.status==='EVIDENCE_COLLECTED'&&<button className="action" onClick={approve}>通过策略检查</button>}{run.status==='AWAITING_APPROVAL'&&<div className="repair"><h3>Execute repair</h3><div className="row"><input value={sku} onChange={e=>setSku(e.target.value)} placeholder="SKU ID"/><input type="number" min="1" value={qty} onChange={e=>setQty(Number(e.target.value))}/></div><input value={key} onChange={e=>setKey(e.target.value)} placeholder="幂等键"/><button className="action" onClick={execute}>执行并验证</button></div>}</article></div><div className="columns"><article className="panel"><div className="paneltitle"><h2>Agent steps</h2></div>{steps.map(s=><div className="tableRow" key={s.step_id}><b>{s.agent_type}</b><span>{s.status}</span><small>{s.error_code||''}</small></div>)}</article><article className="panel"><div className="paneltitle"><h2>Evidence chain</h2></div>{evidence.map(x=><div className="evidence" key={x.evidence_id}><b>{x.tool_name}</b><span>{x.source}</span><code>{x.evidence_id}</code></div>)}</article></div></section>}</main></>
+  const [message, setMessage] = useState('调查订单 O1001 的支付和库存链路')
+  const [orderId, setOrderId] = useState('O1001')
+  const [run, setRun] = useState<api.Run>()
+  const [events, setEvents] = useState<api.TimelineEvent[]>([])
+  const [steps, setSteps] = useState<api.Step[]>([])
+  const [evidence, setEvidence] = useState<api.Evidence[]>([])
+  const [approvals, setApprovals] = useState<api.Approval[]>([])
+  const [error, setError] = useState('')
+  const [sku, setSku] = useState('SKU1')
+  const [qty, setQty] = useState(1)
+  const [key, setKey] = useState('repair-' + Date.now())
+
+  const refresh = async () => { if (!run) return; try { const [next, stepResult, evidenceResult, approvalResult] = await Promise.all([api.getRun(run.run_id), api.getSteps(run.run_id), api.getEvidence(run.run_id), api.getApprovals(run.run_id)]); setRun(next); setSteps(stepResult.steps); setEvidence(evidenceResult.evidence); setApprovals(approvalResult.approvals) } catch (e) { setError((e as Error).message) } }
+  useEffect(() => { if (!run) return; const stop = api.subscribe(run.run_id, event => { setEvents(current => [...current, event]); refresh() }); return stop }, [run?.run_id])
+  const start = async (event: FormEvent) => { event.preventDefault(); setError(''); try { const created = await api.createInvestigation(message, orderId); setRun(created); setEvents([]); setSteps([]); setEvidence([]); setApprovals([]) } catch (e) { setError((e as Error).message) } }
+  const approve = async () => { if (!run) return; try { setRun(await api.approveRun(run.run_id)); await refresh() } catch (e) { setError((e as Error).message) } }
+  const execute = async () => { if (!run) return; try { setRun(await api.executeRun(run.run_id, [{ sku_id: sku, quantity: qty }], key)); await refresh() } catch (e) { setError((e as Error).message) } }
+  const diagnosis = run?.final_summary?.diagnosis
+  const healthy = diagnosis?.root_cause === 'NO_ISSUE' || run?.status === 'NO_ANOMALY'
+  const finishedWithError = ['REJECTED', 'EXECUTION_FAILED', 'VERIFICATION_FAILED', 'INVESTIGATION_FAILED', 'INCONCLUSIVE'].includes(run?.status || '')
+
+  return <><header><div className="brand"><SearchCheck size={22} /><strong>OrderGuard</strong></div><span className="connection"><i />Runtime connected</span></header><main>
+    <h1>订单调查</h1>
+    <section className="section-block query-block"><div className="query-layout"><form onSubmit={start}><div className="section-head"><div><h2>发起调查</h2><p>输入订单和需要排查的问题</p></div></div><div className="query-fields"><label><span>调查问题</span><input value={message} onChange={event => setMessage(event.target.value)} /></label><label className="order-field"><span>订单号</span><input value={orderId} onChange={event => setOrderId(event.target.value)} /></label><button type="submit"><Search size={17} />开始调查</button></div></form><aside className="approval-panel"><div className="section-head"><div><h2>审批记录</h2><p>诊断确认与修复授权</p></div><span>{approvals.length} 条</span></div>{run?.status === 'EVIDENCE_COLLECTED' && diagnosis && <button className="approval-action" onClick={approve}>{diagnosis.root_cause === 'NO_ISSUE' ? '确认链路正常' : '批准修复方案'}</button>}<div className="approval-list">{approvals.length ? approvals.map(item => <div className="approval-row" key={item.approval_id}><Check size={16} /><div><strong>{item.type === 'NO_ISSUE_CONFIRMATION' ? '正常结论确认' : '修复方案批准'}</strong><span>{item.conclusion}</span><time>{new Date(item.created_at).toLocaleString()}</time></div></div>) : <p className="empty">当前没有审批记录。</p>}</div></aside></div></section>
+    {error && <div className="error"><CircleAlert size={18} />{error}</div>}
+    <div className="run-content"><div className="run-meta"><div><span>Run ID</span><code>{run?.run_id || '尚未创建'}</code></div><div className="run-meta-actions"><span className="status-badge">{run ? statusText[run.status] || run.status : '未开始'}</span>{run && <button className="icon-button" onClick={refresh} title="刷新调查数据" aria-label="刷新调查数据"><RefreshCw size={17} /></button>}</div></div>
+      <AgentProgress steps={steps} status={run?.status} />
+      <section className={`section-block result-block ${healthy ? 'result-ok' : diagnosis || finishedWithError ? 'result-alert' : ''}`}><div className="result-icon">{healthy ? <Check size={22} /> : diagnosis || finishedWithError ? <CircleAlert size={22} /> : <SearchCheck size={22} />}</div><div><span className="section-label">调查结论</span><h2>{healthy ? '链路没有问题' : diagnosis ? '发现需要关注的异常' : finishedWithError ? (statusText[run?.status || ''] || '调查未完成') : run ? '正在检查订单链路' : '等待发起调查'}</h2><p>{healthy ? '支付、事件发布和库存处理均符合预期，无需执行修复。' : diagnosis ? `候选根因：${diagnosis.root_cause}` : run ? '系统正在收集证据并生成诊断。' : '提交订单后，调查结果将在这里显示。'}</p></div>{diagnosis && <span className="confidence">{Math.round(diagnosis.confidence * 100)}% confidence</span>}</section>
+      <section className="section-block"><div className="section-head"><div><h2>诊断详情</h2><p>根因判断与处置建议</p></div></div>{diagnosis ? <div className="diagnosis"><h3 className={healthy ? 'healthy' : ''}>{diagnosis.root_cause}</h3>{diagnosis.evidence_ids?.length > 0 && <p>关联证据：{diagnosis.evidence_ids.join(', ')}</p>}{diagnosis.recommended_action && <span className="action-tag">{diagnosis.recommended_action}</span>}{run?.status === 'AWAITING_APPROVAL' && <div className="repair-form"><h3>执行库存修复</h3><div><input value={sku} onChange={event => setSku(event.target.value)} placeholder="SKU ID" /><input type="number" min="1" value={qty} onChange={event => setQty(Number(event.target.value))} /><input value={key} onChange={event => setKey(event.target.value)} placeholder="幂等键" /><button onClick={execute}>执行并验证</button></div></div>}</div> : <p className="empty">调查完成后，根因判断将在这里显示。</p>}</section>
+      <section className="section-block"><div className="section-head"><div><h2>证据链</h2><p>调查期间保存的不可变证据快照</p></div><span>{evidence.length} 条</span></div><div className="evidence-list">{evidence.length ? evidence.map(item => <div className="evidence-row" key={item.evidence_id}><div><strong>{item.tool_name}</strong><span>{item.source}</span></div><code>{item.evidence_id}</code></div>) : <p className="empty">等待实时证据。</p>}</div></section>
+      <section className="section-block"><div className="section-head"><div><h2>事件记录</h2><p>SSE 实时运行日志</p></div><span>{events.length} 条</span></div><div className="event-window">{events.length ? events.slice().reverse().map((item, index) => <div className="event-row" key={`${item.id || ''}-${index}`}><time>{new Date(item.created_at || '').toLocaleTimeString()}</time><div><strong>{item.type}</strong><code>{JSON.stringify(item.payload)}</code></div></div>) : <p className="empty">等待运行事件。</p>}</div></section>
+    </div>
+  </main></>
 }

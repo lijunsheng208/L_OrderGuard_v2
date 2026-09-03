@@ -70,6 +70,43 @@ func (r *Repository) SaveVerificationResult(ctx context.Context, runID, executio
 	return err
 }
 
+// SaveApprovalRecord 保存一次诊断结论或修复动作审批。
+func (r *Repository) SaveApprovalRecord(ctx context.Context, runID, approvalType, decision, conclusion string, nextStatus Status) (ApprovalRecord, error) {
+	record := ApprovalRecord{
+		ID: newID("approval"), RunID: runID, Type: approvalType,
+		Decision: decision, Conclusion: conclusion, NextStatus: nextStatus,
+		CreatedAt: time.Now().UTC(),
+	}
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO agent.approval_records (
+			id, run_id, approval_type, decision, conclusion, next_status, created_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		record.ID, record.RunID, record.Type, record.Decision,
+		record.Conclusion, record.NextStatus, record.CreatedAt,
+	)
+	return record, err
+}
+
+// ListApprovalRecords 返回指定调查的全部审批记录。
+func (r *Repository) ListApprovalRecords(ctx context.Context, runID string) ([]ApprovalRecord, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, run_id, approval_type, decision, conclusion, next_status, created_at
+		FROM agent.approval_records WHERE run_id=$1 ORDER BY created_at DESC`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]ApprovalRecord, 0)
+	for rows.Next() {
+		var item ApprovalRecord
+		if err := rows.Scan(&item.ID, &item.RunID, &item.Type, &item.Decision, &item.Conclusion, &item.NextStatus, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
 // NewRepository 创建 Agent Runtime Repository。
 func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db}
