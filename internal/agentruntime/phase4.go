@@ -7,23 +7,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
-	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 	"github.com/lijunsheng/orderguard/internal/mcp"
 )
 
-const knowledgeAgentPrompt = `你是 OrderGuard Knowledge Agent。
-根据当前订单问题，使用提供的 knowledge-mcp 只读工具检索相关故障手册、历史事故、服务拓扑、状态机和修复策略。
-至少调用一次工具；不得调用业务或观测工具，不得执行修复。
-完成后只输出 JSON：{"summary":"...","sources":["knowledge/..."] ,"gaps":["..."]}`
-
 // RunDiagnosisAgent 调用 Eino Diagnosis Agent 并校验结构化输出。
-func (o *Orchestrator) RunDiagnosisAgent(ctx context.Context, run Run) (Diagnosis, error) {
+func (o *Orchestrator) RunDiagnosisAgent(ctx context.Context, run Run, investigation InvestigationResult, knowledge KnowledgeResult) (Diagnosis, error) {
 	if o.phase4Model == nil {
 		return o.DiagnoseFromEvidence(ctx, run)
 	}
@@ -31,7 +24,12 @@ func (o *Orchestrator) RunDiagnosisAgent(ctx context.Context, run Run) (Diagnosi
 	if err != nil {
 		return Diagnosis{}, err
 	}
-	input, _ := json.Marshal(map[string]any{"message": run.UserMessage, "order_id": run.OrderID, "evidence": evidence})
+	inputPayload := map[string]any{
+		"message": run.UserMessage, "order_id": run.OrderID,
+		"investigation": investigation, "knowledge": knowledge,
+		"evidence": evidence,
+	}
+	input, _ := json.Marshal(inputPayload)
 	response, err := o.phase4Model.Generate(ctx, []*schema.Message{schema.SystemMessage(BuildDiagnosisPrompt()), schema.UserMessage(string(input))})
 	if err != nil {
 		return Diagnosis{}, fmt.Errorf("diagnosis agent: %w", err)
@@ -116,36 +114,130 @@ func (o *Orchestrator) ProcessPhase4(parent context.Context, run Run) error {
 }
 
 // CollectKnowledge 调用本地知识 MCP 并把结果保存为证据。
-func (o *Orchestrator) CollectKnowledge(ctx context.Context, run *Run) error {
+func (o *Orchestrator) CollectKnowledge(ctx context.Context, run *Run, investigation InvestigationResult) (KnowledgeResult, error) {
 	if o.phase4Model == nil {
-		return errors.New("knowledge agent model is not configured")
-	}
-	chatModel, ok := o.phase4Model.(model.ToolCallingChatModel)
-	if !ok {
-		return errors.New("knowledge agent requires a tool-calling model")
+		return KnowledgeResult{}, errors.New("knowledge intent model is not configured")
 	}
 	if _, ok := o.knowledgeTool("search_runbook"); !ok {
-		return errors.New("knowledge-mcp is not configured")
+		return KnowledgeResult{}, errors.New("knowledge-mcp is not configured")
 	}
 	step, err := o.repository.StartStep(ctx, run.ID, "KNOWLEDGE", "local-markdown", map[string]any{"order_id": run.OrderID})
 	if err != nil {
-		return err
+		return KnowledgeResult{}, err
 	}
-	guard := NewToolGuard(run.OrderID, 8, 2)
-	agent, err := react.NewAgent(ctx, &react.AgentConfig{ToolCallingModel: chatModel, ToolsConfig: compose.ToolsNodeConfig{Tools: o.knowledgeTools(*run, step, guard)}, MaxStep: 12})
-	if err != nil {
-		return err
-	}
-	input, _ := json.Marshal(map[string]any{"message": run.UserMessage, "order_id": run.OrderID})
-	_, err = agent.Generate(ctx, []*schema.Message{schema.SystemMessage(knowledgeAgentPrompt), schema.UserMessage(string(input))})
+	input, _ := json.Marshal(map[string]any{"order_id": run.OrderID, "investigation": investigation})
+	response, err := o.phase4Model.Generate(ctx, []*schema.Message{schema.SystemMessage(KnowledgeIntentPrompt), schema.UserMessage(string(input))})
 	if err != nil {
 		_ = o.repository.FinishStep(ctx, &step, map[string]any{"error": err.Error()}, 0, 0, "KNOWLEDGE_FAILED")
-		return err
+		return KnowledgeResult{}, fmt.Errorf("knowledge intent agent: %w", err)
 	}
-	if guard.Total() == 0 {
-		return errors.New("knowledge agent collected no observations")
+	var intents KnowledgeIntentResult
+	if err := decodeModelJSON(response.Content, &intents); err != nil {
+		return KnowledgeResult{}, fmt.Errorf("decode knowledge intents: %w", err)
 	}
-	_ = o.repository.FinishStep(ctx, &step, map[string]any{"tool_calls": guard.Total()}, 0, 0, "")
+	plan, err := buildKnowledgePlan(intents)
+	if err != nil {
+		return KnowledgeResult{}, err
+	}
+	result := KnowledgeResult{Intents: intents, Plan: plan}
+	if err := o.executeKnowledgePlan(ctx, *run, step, &result); err != nil {
+		return result, err
+	}
+	inputTokens, outputTokens := messageUsage(response)
+	_ = o.repository.FinishStep(ctx, &step, result, inputTokens, outputTokens, "")
+	return result, nil
+}
+
+// buildKnowledgePlan 将模型意图映射为受限、去重的 MCP 调用计划。
+func buildKnowledgePlan(intents KnowledgeIntentResult) (KnowledgeExecutionPlan, error) {
+	if len(intents.Intents) == 0 || len(intents.Intents) > 4 {
+		return KnowledgeExecutionPlan{}, errors.New("knowledge intents must contain 1 to 4 items")
+	}
+	seen := map[string]bool{}
+	plan := KnowledgeExecutionPlan{}
+	for _, in := range intents.Intents {
+		if (in.Type == "historical_incident" || in.Type == "runbook") && (len(in.Keywords) < 1 || len(in.Keywords) > 4) {
+			return KnowledgeExecutionPlan{}, errors.New("knowledge search intent must contain 1 to 4 keywords")
+		}
+		if len(in.Keywords) > 4 {
+			return KnowledgeExecutionPlan{}, errors.New("knowledge intent has too many keywords")
+		}
+		for i := range in.Keywords {
+			in.Keywords[i] = strings.TrimSpace(in.Keywords[i])
+		}
+		var toolName string
+		args := map[string]any{}
+		switch in.Type {
+		case "historical_incident":
+			toolName = "search_historical_incidents"
+		case "runbook":
+			toolName = "search_runbook"
+		case "service_topology":
+			toolName = "get_service_topology"
+			if strings.TrimSpace(in.Service) == "" {
+				return KnowledgeExecutionPlan{}, errors.New("service_topology requires service")
+			}
+			args["service"] = strings.TrimSpace(in.Service)
+		case "state_machine":
+			toolName = "get_state_machine"
+			if strings.TrimSpace(in.Domain) == "" {
+				return KnowledgeExecutionPlan{}, errors.New("state_machine requires domain")
+			}
+			args["domain"] = strings.TrimSpace(in.Domain)
+		case "repair_policy":
+			toolName = "get_repair_policy"
+			if strings.TrimSpace(in.Action) == "" {
+				return KnowledgeExecutionPlan{}, errors.New("repair_policy requires action")
+			}
+			args["action"] = strings.TrimSpace(in.Action)
+		default:
+			return KnowledgeExecutionPlan{}, fmt.Errorf("unknown knowledge intent type: %s", in.Type)
+		}
+		if toolName == "search_runbook" || toolName == "search_historical_incidents" {
+			query := strings.TrimSpace(strings.Join(in.Keywords, " "))
+			if query == "" {
+				return KnowledgeExecutionPlan{}, errors.New("knowledge search intent has empty keywords")
+			}
+			args["query"] = query
+		}
+		keyBytes, _ := json.Marshal([]any{toolName, args})
+		key := string(keyBytes)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		plan.Calls = append(plan.Calls, KnowledgeCall{Tool: toolName, Arguments: args, Reason: in.Reason})
+	}
+	if len(plan.Calls) == 0 {
+		return KnowledgeExecutionPlan{}, errors.New("knowledge plan contains no executable calls")
+	}
+	return plan, nil
+}
+
+// executeKnowledgePlan 按 Go 计划直接调用知识 MCP，并保存每次结果为证据。
+func (o *Orchestrator) executeKnowledgePlan(ctx context.Context, run Run, step AgentStep, result *KnowledgeResult) error {
+	for _, call := range result.Plan.Calls {
+		registered, ok := o.knowledgeTool(call.Tool)
+		if !ok {
+			return fmt.Errorf("knowledge tool unavailable: %s", call.Tool)
+		}
+		if err := mcpValidate(registered, call.Arguments); err != nil {
+			return fmt.Errorf("knowledge arguments for %s: %w", call.Tool, err)
+		}
+		callID := newID("call")
+		_, _ = o.repository.AppendEvent(ctx, run.ID, "tool.call_started", map[string]any{"step_id": step.ID, "tool_call_id": callID, "tool_name": call.Tool, "arguments": call.Arguments})
+		response, err := registered.Client.CallToolWithMetadata(ctx, call.Tool, call.Arguments, mcp.RequestMetadata{RunID: run.ID, AgentStepID: step.ID, TraceID: run.TraceID, ToolCallID: callID, Caller: "knowledge-agent"})
+		if err != nil {
+			_, _ = o.repository.AppendEvent(ctx, run.ID, "tool.call_completed", map[string]any{"step_id": step.ID, "tool_call_id": callID, "tool_name": call.Tool, "success": false})
+			return err
+		}
+		if response.StructuredContent.Success {
+			if err := saveEnvelopeEvidence(ctx, o.repository, &run, step, callID, call.Tool, call.Arguments, response.StructuredContent); err != nil {
+				return err
+			}
+		}
+		_, _ = o.repository.AppendEvent(ctx, run.ID, "tool.call_completed", map[string]any{"step_id": step.ID, "tool_call_id": callID, "tool_name": call.Tool, "success": response.StructuredContent.Success, "evidence_id": response.StructuredContent.EvidenceID})
+	}
 	return nil
 }
 
@@ -190,21 +282,34 @@ func (o *Orchestrator) DiagnoseFromEvidence(ctx context.Context, run Run) (Diagn
 	ids := make([]string, 0)
 	hasInventory := false
 	notDeducted := false
+	deducted := false
 	hasPayment := false
+	paymentSuccess := false
+	outboxPublished := false
 	for _, item := range evidence {
 		ids = append(ids, item.EvidenceID)
 		if item.ToolName == "get_inventory_status" {
 			hasInventory = true
-			notDeducted = string(item.Data) != "" && (contains(string(item.Data), "NOT_DEDUCTED"))
+			data := string(item.Data)
+			notDeducted = notDeducted || contains(data, "NOT_DEDUCTED")
+			deducted = deducted || contains(data, "DEDUCTED")
 		}
 		if item.ToolName == "get_payment_status" {
 			hasPayment = true
+			paymentSuccess = paymentSuccess || contains(string(item.Data), "SUCCESS")
+		}
+		if item.ToolName == "get_outbox_status" {
+			outboxPublished = outboxPublished || contains(string(item.Data), "PUBLISHED")
 		}
 	}
 	if !hasInventory || !hasPayment || len(ids) == 0 {
 		return Diagnosis{}, errors.New("insufficient evidence")
 	}
 	d := Diagnosis{RootCause: "NO_CONFIRMED_ROOT_CAUSE", Confidence: 0.35, EvidenceIDs: ids}
+	if !notDeducted && deducted && paymentSuccess && (outboxPublished || !hasPayment) {
+		d.RootCause = "NO_ISSUE"
+		d.Confidence = 0.9
+	}
 	if notDeducted {
 		d.RootCause = "PAYMENT_EVENT_NOT_PUBLISHED"
 		d.Confidence = 0.78

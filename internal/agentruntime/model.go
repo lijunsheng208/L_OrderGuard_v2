@@ -130,3 +130,37 @@ type Fact struct {
 	EvidenceID string `json:"evidence_id"`
 	Fact       string `json:"fact"`
 }
+
+// KnowledgeIntent 是 Knowledge Intent Agent 提取出的检索意图。
+type KnowledgeIntent struct {
+	Type     string   `json:"type"`
+	Keywords []string `json:"keywords,omitempty"`
+	Service  string   `json:"service,omitempty"`
+	Domain   string   `json:"domain,omitempty"`
+	Action   string   `json:"action,omitempty"`
+	Reason   string   `json:"reason,omitempty"`
+}
+
+// KnowledgeIntentResult 是 Knowledge Intent Agent 的结构化输出。
+type KnowledgeIntentResult struct {
+	Intents []KnowledgeIntent `json:"intents"`
+}
+
+// KnowledgeCall 是经过 Go Planner 校验后的知识工具调用。
+type KnowledgeCall struct {
+	Tool      string         `json:"tool"`
+	Arguments map[string]any `json:"arguments"`
+	Reason    string         `json:"reason,omitempty"`
+}
+
+// KnowledgeExecutionPlan 是 Knowledge Executor 唯一允许执行的调用集合。
+type KnowledgeExecutionPlan struct {
+	Calls []KnowledgeCall `json:"calls"`
+}
+
+// KnowledgeResult 是知识检索阶段返回给后续诊断的摘要。
+type KnowledgeResult struct {
+	Intents KnowledgeIntentResult  `json:"intents"`
+	Plan    KnowledgeExecutionPlan `json:"plan"`
+	Gaps    []string               `json:"gaps,omitempty"`
+}

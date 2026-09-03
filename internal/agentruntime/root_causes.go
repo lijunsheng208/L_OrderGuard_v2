@@ -13,6 +13,12 @@ type RootCauseDefinition struct {
 // RootCauseCatalog 是系统允许输出的根因目录，枚举和描述只维护这一份。
 var RootCauseCatalog = []RootCauseDefinition{
 	{
+		Code:             "NO_ISSUE",
+		Meaning:          "当前证据显示订单链路正常，没有发现需要修复的异常。",
+		SupportingSignal: "支付为 SUCCESS、Outbox 为 PUBLISHED、库存为 DEDUCTED，且没有失败或未消费证据。",
+		Exclusion:        "存在未扣减、发布失败、消费失败或状态冲突证据时，不能选择此结果。",
+	},
+	{
 		Code:             "PAYMENT_EVENT_NOT_PUBLISHED",
 		Meaning:          "支付事务已经成功，但 payment.succeeded 没有成功进入 Redis Stream，或 Outbox 长时间保持 PENDING，库存消费者因此没有收到事件。",
 		SupportingSignal: "订单为 PAID、支付为 SUCCESS、库存为 NOT_DEDUCTED，并且事件未找到，或 Outbox 显示 PENDING/发布失败。",

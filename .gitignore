@@ -12,10 +12,10 @@ cpu.prof
 mem.prof
 
 # Frontend dependencies and build output
-/web/node_modules/
-/web/dist/
-/web/.vite/
-/web/coverage/
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.vite/
+/frontend/coverage/
 
 # Runtime data and logs
 /data/

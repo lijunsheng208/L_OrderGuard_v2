@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/lijunsheng/orderguard/internal/config"
 	"log/slog"
 	"time"
 )
@@ -43,7 +44,7 @@ func NewOrchestrator(
 ) *Orchestrator {
 	return &Orchestrator{
 		repository: repository, planner: planner, investigator: investigator,
-		logger: logger, runTimeout: 60 * time.Second,
+		logger: logger, runTimeout: config.AgentRunTimeout(),
 	}
 }
 
@@ -126,7 +127,8 @@ func (o *Orchestrator) Process(parent context.Context, run Run) error {
 		if err := o.repository.Transition(ctx, &run, StatusKnowledgeLookup, "run.status_changed", nil); err != nil {
 			return err
 		}
-		if err := o.CollectKnowledge(ctx, &run); err != nil {
+		knowledgeResult, err := o.CollectKnowledge(ctx, &run, investigatorOutput.Value)
+		if err != nil {
 			_ = o.repository.Fail(ctx, &run, StatusInconclusive, "KNOWLEDGE_FAILED", err.Error())
 			return err
 		}
@@ -137,7 +139,7 @@ func (o *Orchestrator) Process(parent context.Context, run Run) error {
 		if err != nil {
 			return err
 		}
-		diagnosis, err := o.RunDiagnosisAgent(ctx, run)
+		diagnosis, err := o.RunDiagnosisAgent(ctx, run, investigatorOutput.Value, knowledgeResult)
 		if err != nil {
 			_ = o.repository.FinishStep(ctx, &diagnosisStep, map[string]any{"error": err.Error()}, 0, 0, "DIAGNOSIS_INCONCLUSIVE")
 			_ = o.repository.Fail(ctx, &run, StatusInconclusive, "DIAGNOSIS_INCONCLUSIVE", err.Error())

@@ -3,19 +3,21 @@ name: orderguard-v2
 x-go-service: &go-service
   restart: unless-stopped
   environment:
-    HTTP_ADDR: ":8080"
-    DATABASE_URL: "postgres://orderguard:orderguard@postgres:5432/orderguard?sslmode=disable"
-    REDIS_ADDR: "redis:6379"
-    ORDER_SERVICE_URL: "http://order-service:8080"
-    PAYMENT_SERVICE_URL: "http://payment-service:8080"
-    INVENTORY_SERVICE_URL: "http://inventory-service:8080"
-    BUSINESS_MCP_URL: "http://business-mcp:8080/mcp"
-    OBSERVABILITY_MCP_URL: "http://observability-mcp:8080/mcp"
-    KNOWLEDGE_MCP_URL: "http://knowledge-mcp:8080/mcp"
-    REMEDIATION_MCP_URL: "http://remediation-mcp:8080/mcp"
+    HTTP_ADDR: "${HTTP_ADDR:-:8080}"
+    DATABASE_URL: "${DOCKER_DATABASE_URL:-postgres://orderguard:orderguard@postgres:5432/orderguard?sslmode=disable}"
+    REDIS_ADDR: "${DOCKER_REDIS_ADDR:-redis:6379}"
+    ORDER_SERVICE_URL: "${DOCKER_ORDER_SERVICE_URL:-http://order-service:8080}"
+    PAYMENT_SERVICE_URL: "${DOCKER_PAYMENT_SERVICE_URL:-http://payment-service:8080}"
+    INVENTORY_SERVICE_URL: "${DOCKER_INVENTORY_SERVICE_URL:-http://inventory-service:8080}"
+    BUSINESS_MCP_URL: "${DOCKER_BUSINESS_MCP_URL:-http://business-mcp:8080/mcp}"
+    OBSERVABILITY_MCP_URL: "${DOCKER_OBSERVABILITY_MCP_URL:-http://observability-mcp:8080/mcp}"
+    KNOWLEDGE_MCP_URL: "${DOCKER_KNOWLEDGE_MCP_URL:-http://knowledge-mcp:8080/mcp}"
+    REMEDIATION_MCP_URL: "${DOCKER_REMEDIATION_MCP_URL:-http://remediation-mcp:8080/mcp}"
     AGENT_API_KEY: "${AGENT_API_KEY:-}"
     AGENT_BASE_URL: "${AGENT_BASE_URL:-}"
     AGENT_MODEL: "${AGENT_MODEL:-}"
+    AGENT_REQUEST_TIMEOUT_SECONDS: "${AGENT_REQUEST_TIMEOUT_SECONDS:-120}"
+    AGENT_RUN_TIMEOUT_SECONDS: "${AGENT_RUN_TIMEOUT_SECONDS:-300}"
   depends_on:
     migrate:
       condition: service_completed_successfully

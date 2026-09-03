@@ -65,7 +65,7 @@ func createModel(
 	}
 	chatModel, err := openaimodel.NewChatModel(ctx, &openaimodel.ChatModelConfig{
 		APIKey: config.AgentAPIKey(), BaseURL: config.AgentBaseURL(),
-		Model: modelName, Timeout: 45 * time.Second,
+		Model: modelName, Timeout: config.AgentRequestTimeout(),
 	})
 	if err != nil {
 		return nil, modelName, err

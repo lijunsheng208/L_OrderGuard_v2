@@ -7,6 +7,20 @@ import (
 	"github.com/lijunsheng/orderguard/internal/mcp"
 )
 
+// TestDecodeModelJSONExtractsWrappedObject 验证模型添加说明文字时仍能安全提取 JSON。
+func TestDecodeModelJSONExtractsWrappedObject(t *testing.T) {
+	var value struct {
+		Summary string `json:"summary"`
+	}
+	content := "All six steps have been completed. Here is the result:\n`json\n{\"summary\":\"ok\"}\n`"
+	if err := decodeModelJSON(content, &value); err != nil {
+		t.Fatal(err)
+	}
+	if value.Summary != "ok" {
+		t.Fatalf("summary = %q", value.Summary)
+	}
+}
+
 // TestValidateTransition 验证阶段 3 状态机只允许声明的迁移。
 func TestValidateTransition(t *testing.T) {
 	if err := ValidateTransition(StatusCreated, StatusPlanning); err != nil {

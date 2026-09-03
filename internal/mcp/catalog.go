@@ -46,7 +46,7 @@ func Profiles() map[string]ServerProfile {
 					"from": dateTimeField("开始时间"), "to": dateTimeField("结束时间"),
 				}, "service", "metric", "from", "to")),
 				readTool("get_event_record", "查询订单事件记录", objectSchema(fields{
-					"order_id": stringField("订单 ID"), "event_type": stringField("事件类型"),
+					"order_id": stringField("订单 ID"), "event_type": enumStringField("事件类型", "payment.succeeded"),
 				}, "order_id", "event_type")),
 				readTool("get_outbox_status", "查询支付 Outbox 状态", objectSchema(
 					fields{"order_id": stringField("订单 ID")}, "order_id",

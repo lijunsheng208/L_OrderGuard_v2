@@ -122,7 +122,7 @@ CREATE INDEX IF NOT EXISTS tool_calls_run_idx
 ALTER TABLE agent.agent_steps DROP CONSTRAINT IF EXISTS agent_steps_agent_type_check;
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_steps_agent_type_check') THEN
-        ALTER TABLE agent.agent_steps ADD CONSTRAINT agent_steps_agent_type_check CHECK (agent_type IN ('PLANNER', 'INVESTIGATOR', 'KNOWLEDGE', 'DIAGNOSIS', 'CRITIC'));
+        ALTER TABLE agent.agent_steps ADD CONSTRAINT agent_steps_agent_type_check CHECK (agent_type IN ('PLANNER', 'INVESTIGATOR', 'KNOWLEDGE', 'DIAGNOSIS', 'CRITIC', 'VERIFY'));
     END IF;
 END $$;
 

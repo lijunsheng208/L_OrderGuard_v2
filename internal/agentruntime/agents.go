@@ -14,17 +14,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-const plannerPrompt = `你是 OrderGuard Planner。只为当前订单制定只读调查计划，不执行工具，不分析根因。
-输出且只输出 JSON：{"goal":"...","steps":[{"id":"step-1","purpose":"...","tool":"...","args":{}}]}。
-计划应包含 4 到 8 步，优先确认订单、支付、库存和支付成功事件，再根据问题补充 Outbox、日志、Trace 或指标查询。
-只能使用输入中列出的工具；所有带 order_id 的参数必须使用当前订单。`
-
-const investigatorPrompt = `你是 OrderGuard Investigator。按照已验证计划调查当前订单，并可根据中间证据动态追加只读工具调用。
-你只能使用提供的工具，禁止提出或执行任何修复。found=false 是有效的否定证据，不是工具错误。
-完成至少四次有意义的工具调用后，输出且只输出 JSON：
-{"summary":"...","facts":[{"evidence_id":"ev-...","fact":"..."}],"remaining_questions":["..."]}。
-每条 fact 必须引用工具结果中真实存在的 evidence_id；证据不足时在 remaining_questions 中说明，不得输出根因枚举。`
-
 // AgentOutput 保存一次 Eino 模型执行结果和用量。
 type AgentOutput[T any] struct {
 	Value        T
@@ -67,7 +56,7 @@ func (p *Planner) Run(ctx context.Context, run Run) (AgentOutput[Plan], error) {
 		return AgentOutput[Plan]{}, fmt.Errorf("encode planner input: %w", err)
 	}
 	response, err := p.model.Generate(ctx, []*schema.Message{
-		schema.SystemMessage(plannerPrompt), schema.UserMessage(string(input)),
+		schema.SystemMessage(PlannerPrompt), schema.UserMessage(string(input)),
 	})
 	if err != nil {
 		return AgentOutput[Plan]{}, fmt.Errorf("generate investigation plan: %w", err)
@@ -109,6 +98,12 @@ func (p *Planner) validatePlan(run Run, plan Plan) error {
 		}
 		if orderID, ok := step.Args["order_id"].(string); ok && orderID != run.OrderID {
 			return fmt.Errorf("planner step %s uses a different order_id", step.ID)
+		}
+		if step.Tool == "get_event_record" {
+			eventType, _ := step.Args["event_type"].(string)
+			if eventType != "payment.succeeded" {
+				return fmt.Errorf("planner step %s must use event_type payment.succeeded", step.ID)
+			}
 		}
 	}
 	return nil
@@ -168,7 +163,7 @@ func (i *Investigator) Run(
 		return AgentOutput[InvestigationResult]{}, fmt.Errorf("encode investigator input: %w", err)
 	}
 	response, err := agent.Generate(ctx, []*schema.Message{
-		schema.SystemMessage(investigatorPrompt), schema.UserMessage(string(input)),
+		schema.SystemMessage(InvestigatorPrompt), schema.UserMessage(string(input)),
 	})
 	if err != nil {
 		return AgentOutput[InvestigationResult]{}, fmt.Errorf("run investigator react agent: %w", err)
@@ -229,6 +224,14 @@ func decodeModelJSON(content string, target any) error {
 			return errors.New("invalid JSON code block")
 		}
 		trimmed = strings.TrimSpace(trimmed[firstLine+1 : lastFence])
+	}
+	// 兼容模型在 JSON 前后添加说明文字，但仍只解析唯一的 JSON 对象。
+	if !strings.HasPrefix(trimmed, "{") {
+		start, end := strings.IndexByte(trimmed, '{'), strings.LastIndexByte(trimmed, '}')
+		if start < 0 || end <= start {
+			return errors.New("model response does not contain a JSON object")
+		}
+		trimmed = trimmed[start : end+1]
 	}
 	decoder := json.NewDecoder(strings.NewReader(trimmed))
 	decoder.DisallowUnknownFields()

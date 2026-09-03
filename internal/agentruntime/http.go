@@ -33,7 +33,23 @@ func NewHandler(repository *Repository, orchestrator *Orchestrator) http.Handler
 	mux.HandleFunc("GET /api/v1/investigations/{id}/events", handler.streamEvents)
 	mux.HandleFunc("POST /api/v1/investigations/{id}/approve", handler.approveRun)
 	mux.HandleFunc("POST /api/v1/investigations/{id}/execute", handler.executeRun)
-	return tracing.Middleware(mux)
+	return tracing.Middleware(cors(mux))
+}
+
+// cors 处理本地 React 控制台的跨域预检请求。
+func cors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:5173")
+		w.Header().Set("Vary", "Origin")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID, X-Trace-ID")
+		w.Header().Set("Access-Control-Max-Age", "600")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // executeRun 在无需人工审批的模式下执行幂等修复并验证结果。

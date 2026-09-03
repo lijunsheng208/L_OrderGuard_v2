@@ -1,6 +1,10 @@
 package config
 
-import "os"
+import (
+	"os"
+	"strconv"
+	"time"
+)
 
 // DatabaseURL 返回 PostgreSQL 连接地址。
 func DatabaseURL() string {
@@ -63,10 +67,25 @@ func AgentModel() string {
 	return os.Getenv("AGENT_MODEL")
 }
 
+// AgentRequestTimeout 返回单次模型请求超时时间。
+func AgentRequestTimeout() time.Duration { return durationValue("AGENT_REQUEST_TIMEOUT_SECONDS", 120) }
+
+// AgentRunTimeout 返回一次调查任务的总超时时间。
+func AgentRunTimeout() time.Duration { return durationValue("AGENT_RUN_TIMEOUT_SECONDS", 300) }
+
 // value 读取环境变量，未设置时返回默认值。
 func value(key, fallback string) string {
 	if result := os.Getenv(key); result != "" {
 		return result
 	}
 	return fallback
+}
+
+// durationValue 读取秒数形式的超时配置。
+func durationValue(key string, fallback int) time.Duration {
+	seconds, err := strconv.Atoi(value(key, strconv.Itoa(fallback)))
+	if err != nil || seconds <= 0 {
+		seconds = fallback
+	}
+	return time.Duration(seconds) * time.Second
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -606,10 +607,11 @@ func appendEventTx(
 
 // agentEvent 将 Agent 类型转换为稳定事件名。
 func agentEvent(agentType, suffix string) string {
-	if agentType == "PLANNER" {
-		return "planner." + suffix
+	prefixes := map[string]string{"PLANNER": "planner", "INVESTIGATOR": "investigator", "KNOWLEDGE": "knowledge", "DIAGNOSIS": "diagnosis", "CRITIC": "critic", "VERIFY": "verify"}
+	if prefix, ok := prefixes[agentType]; ok {
+		return prefix + "." + suffix
 	}
-	return "investigator." + suffix
+	return "agent." + strings.ToLower(agentType) + "." + suffix
 }
 
 // newID 生成本地唯一的运行时标识。
