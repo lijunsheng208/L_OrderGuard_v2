@@ -3,6 +3,8 @@ package agentruntime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +32,7 @@ func NewHandler(repository *Repository, orchestrator *Orchestrator) http.Handler
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handler.health)
 	mux.HandleFunc("POST /api/v1/investigations", handler.createRun)
+	mux.HandleFunc("POST /api/v1/evaluations/single-agent/runs", handler.createSingleAgentEvaluationRun)
 	mux.HandleFunc("GET /api/v1/investigations/{id}", handler.getRun)
 	mux.HandleFunc("GET /api/v1/investigations/{id}/steps", handler.getSteps)
 	mux.HandleFunc("GET /api/v1/investigations/{id}/evidence", handler.getEvidence)
@@ -39,6 +42,82 @@ func NewHandler(repository *Repository, orchestrator *Orchestrator) http.Handler
 	mux.HandleFunc("POST /api/v1/investigations/{id}/execute", handler.executeRun)
 	mux.HandleFunc("POST /api/v1/demo/faults", handler.injectDemoFault)
 	return tracing.Middleware(cors(mux))
+}
+
+// createSingleAgentEvaluationRun imports a single-agent diagnosis into the
+// normal Runtime lifecycle. It is intentionally namespaced under evaluations:
+// the endpoint is for reproducible architecture comparisons, not production
+// investigation creation.
+func (h *Handler) createSingleAgentEvaluationRun(w http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Message   string               `json:"message"`
+		OrderID   string               `json:"order_id"`
+		Plan      Plan                 `json:"plan"`
+		Diagnosis Diagnosis            `json:"diagnosis"`
+		Evidence  []evaluationEvidence `json:"evidence"`
+		ModelName string               `json:"model_name"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, request.Body, 4<<20)).Decode(&input); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_JSON", "invalid evaluation payload")
+		return
+	}
+	if strings.TrimSpace(input.OrderID) == "" || input.Diagnosis.RootCause == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_EVALUATION", "order_id and diagnosis.root_cause are required")
+		return
+	}
+	run, err := h.repository.CreateRun(request.Context(), input.Message, input.OrderID, tracing.ID(request.Context()))
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "CREATE_EVALUATION_RUN_FAILED", err.Error())
+		return
+	}
+	// Reuse the existing DIAGNOSIS step type so the evaluation run remains
+	// compatible with the production agent_steps enum and artifact readers.
+	step, err := h.repository.StartStep(request.Context(), run.ID, "DIAGNOSIS", input.ModelName, map[string]any{"message": input.Message, "order_id": input.OrderID, "architecture": "single_agent"})
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "CREATE_EVALUATION_STEP_FAILED", err.Error())
+		return
+	}
+	if len(input.Plan.Steps) > 0 {
+		if err := h.repository.SavePlan(request.Context(), run.ID, input.Plan); err != nil {
+			httpx.WriteError(w, http.StatusInternalServerError, "SAVE_EVALUATION_PLAN_FAILED", err.Error())
+			return
+		}
+	}
+	result := InvestigationResult{Summary: "single-agent evaluation diagnosis", Diagnosis: &input.Diagnosis}
+	if err := h.repository.FinishStep(request.Context(), &step, result, 0, 0, ""); err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "FINISH_EVALUATION_STEP_FAILED", err.Error())
+		return
+	}
+	for _, item := range input.Evidence {
+		data, err := json.Marshal(item.Data)
+		if err != nil {
+			httpx.WriteError(w, 400, "INVALID_EVIDENCE", err.Error())
+			return
+		}
+		args, _ := json.Marshal(item.Arguments)
+		hash := sha256.Sum256(data)
+		evidence := Evidence{EvidenceID: item.EvidenceID, RunID: run.ID, AgentStepID: step.ID, ToolCallID: item.ToolCallID, ToolName: item.ToolName, Arguments: args, Source: "evaluation-single-agent", CollectedAt: time.Now().UTC(), Data: data, ContentHash: hex.EncodeToString(hash[:])}
+		if evidence.EvidenceID == "" {
+			evidence.EvidenceID = newID("ev-eval")
+		}
+		if err := h.repository.SaveEvidence(request.Context(), evidence); err != nil {
+			httpx.WriteError(w, 500, "SAVE_EVALUATION_EVIDENCE_FAILED", err.Error())
+			return
+		}
+	}
+	if err := h.repository.CompleteStatus(request.Context(), &run, result, StatusEvidenceCollected); err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "COMPLETE_EVALUATION_RUN_FAILED", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, run)
+}
+
+type evaluationEvidence struct {
+	EvidenceID string         `json:"evidence_id"`
+	ToolCallID string         `json:"tool_call_id"`
+	ToolName   string         `json:"tool_name"`
+	Arguments  map[string]any `json:"arguments"`
+	Data       any            `json:"data"`
 }
 
 func (h *Handler) injectDemoFault(w http.ResponseWriter, request *http.Request) {
@@ -302,6 +381,23 @@ func (h *Handler) approveRun(w http.ResponseWriter, request *http.Request) {
 	var result InvestigationResult
 	if err := json.Unmarshal(run.FinalSummary, &result); err != nil || result.Diagnosis == nil {
 		httpx.WriteError(w, http.StatusConflict, "DIAGNOSIS_REQUIRED", "investigation diagnosis is unavailable")
+		return
+	}
+	evidence, err := h.repository.ListEvidence(request.Context(), run.ID)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "QUERY_EVIDENCE_FAILED", err.Error())
+		return
+	}
+	// Re-check all evidence at the authorization boundary. A diagnosis may
+	// have cited only one side of a conflict, but that must never authorize a
+	// repair.
+	if evidenceRequiresInconclusive(evidence) {
+		message := "conflicting or dirty evidence requires manual review"
+		if err := h.repository.Fail(request.Context(), &run, StatusInconclusive, "EVIDENCE_CONFLICT", message); err != nil {
+			httpx.WriteError(w, http.StatusConflict, "POLICY_REJECTED", err.Error())
+			return
+		}
+		httpx.WriteError(w, http.StatusConflict, "EVIDENCE_CONFLICT", message)
 		return
 	}
 	if result.Diagnosis.RootCause == "NO_ISSUE" {

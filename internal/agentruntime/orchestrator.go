@@ -152,6 +152,18 @@ func (o *Orchestrator) Process(parent context.Context, run Run) error {
 			if err != nil {
 				return err
 			}
+			// Conflicting or dirty evidence is a hard safety stop. Do not let a
+			// model select only the favorable evidence and turn the run into an
+			// executable diagnosis.
+			if evidenceRequiresInconclusive(evidence) {
+				err := errors.New("evidence is conflicting or contains dirty data")
+				_ = o.repository.FinishStep(ctx, &diagnosisStep, map[string]any{
+					"diagnosis": diagnosis,
+					"error":     err.Error(),
+				}, 0, 0, "EVIDENCE_CONFLICT")
+				_ = o.repository.Fail(ctx, &run, StatusInconclusive, "EVIDENCE_CONFLICT", err.Error())
+				return err
+			}
 			validation := ValidateDiagnosisRootCause(diagnosis, evidence)
 			if validation.Valid {
 				if err := o.repository.FinishStep(ctx, &diagnosisStep, map[string]any{"diagnosis": diagnosis, "validation": validation}, 0, 0, ""); err != nil {

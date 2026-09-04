@@ -80,6 +80,15 @@ func resetDemoInventory(ctx context.Context, tx pgx.Tx, orderID string) error {
 	if err := restoreDemoStock(ctx, tx, orderID); err != nil {
 		return err
 	}
+	// Demo orders are created repeatedly by the UI and evaluation harness. Keep
+	// the fixture SKU replenished so replaying a failed consumer is not rejected
+	// merely because an earlier demo run exhausted the shared stock row.
+	if _, err := tx.Exec(ctx, `
+		UPDATE inventory.stocks
+		SET available = GREATEST(available, 100), updated_at = now()
+		WHERE sku_id IN (SELECT DISTINCT sku_id FROM orders.order_items WHERE order_id=$1)`, orderID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM inventory.deductions WHERE order_id=$1`, orderID); err != nil {
 		return err
 	}

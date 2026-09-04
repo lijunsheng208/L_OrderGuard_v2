@@ -92,6 +92,20 @@ func TestDiagnosticSignalsRejectDirtyInventoryData(t *testing.T) {
 	}
 }
 
+func TestEvidenceRequiresInconclusiveChecksAllEvidence(t *testing.T) {
+	evidence := []Evidence{
+		testEvidence("get_payment_status", map[string]any{"status": "SUCCESS"}),
+		testEvidence("get_inventory_status", map[string]any{"status": "NOT_DEDUCTED"}),
+		testEvidence("get_trace", map[string]any{"service": "inventory-service", "operation": "deduct_inventory", "signals": []any{
+			map[string]any{"status": "OK", "message": "inventory deduction success"},
+			map[string]any{"status": "ERROR", "message": "inventory deduction rollback"},
+		}}),
+	}
+	if !evidenceRequiresInconclusive(evidence) {
+		t.Fatal("all evidence must be considered when detecting conflicts")
+	}
+}
+
 func TestValidateDiagnosisRootCauseChecksCandidateWithoutReplacingIt(t *testing.T) {
 	evidence := []Evidence{
 		testEvidence("get_payment_status", map[string]any{"status": "SUCCESS"}),
