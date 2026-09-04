@@ -145,6 +145,7 @@ func (i *Investigator) Run(
 	run Run,
 	step AgentStep,
 	plan Plan,
+	supplements ...SupplementalInvestigationRequest,
 ) (AgentOutput[InvestigationResult], error) {
 	if i.model == nil {
 		return AgentOutput[InvestigationResult]{}, errors.New("investigator model is not configured")
@@ -159,9 +160,13 @@ func (i *Investigator) Run(
 	if err != nil {
 		return AgentOutput[InvestigationResult]{}, fmt.Errorf("create investigator react agent: %w", err)
 	}
-	input, err := json.Marshal(map[string]any{
+	inputPayload := map[string]any{
 		"message": run.UserMessage, "order_id": run.OrderID, "plan": plan,
-	})
+	}
+	if len(supplements) > 0 {
+		inputPayload["supplemental_request"] = supplements[0]
+	}
+	input, err := json.Marshal(inputPayload)
 	if err != nil {
 		return AgentOutput[InvestigationResult]{}, fmt.Errorf("encode investigator input: %w", err)
 	}

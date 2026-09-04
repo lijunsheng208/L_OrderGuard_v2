@@ -91,3 +91,45 @@ func TestDiagnosticSignalsRejectDirtyInventoryData(t *testing.T) {
 		t.Fatalf("got %s", got.RootCause)
 	}
 }
+
+func TestValidateDiagnosisRootCauseChecksCandidateWithoutReplacingIt(t *testing.T) {
+	evidence := []Evidence{
+		testEvidence("get_payment_status", map[string]any{"status": "SUCCESS"}),
+		testEvidence("get_inventory_status", map[string]any{"status": "NOT_DEDUCTED"}),
+		testEvidence("get_outbox_status", map[string]any{"found": true, "publish_status": "PENDING"}),
+	}
+	result := Diagnosis{
+		RootCause: "PAYMENT_EVENT_NOT_PUBLISHED", Confidence: 0.9,
+		EvidenceIDs: []string{"get_payment_status", "get_inventory_status", "get_outbox_status"},
+	}
+	validation := ValidateDiagnosisRootCause(result, evidence)
+	if !validation.Valid {
+		t.Fatalf("validation rejected supported root cause: %v", validation.Issues)
+	}
+
+	result.RootCause = "INVENTORY_DEDUCTION_NOT_PERSISTED"
+	validation = ValidateDiagnosisRootCause(result, evidence)
+	if validation.Valid {
+		t.Fatal("validation accepted root cause without consumer success evidence")
+	}
+	if result.RootCause != "INVENTORY_DEDUCTION_NOT_PERSISTED" {
+		t.Fatalf("validator replaced agent root cause with %s", result.RootCause)
+	}
+}
+
+func TestValidateDiagnosisRootCauseUsesCitedEvidenceOnly(t *testing.T) {
+	evidence := []Evidence{
+		testEvidence("payment", map[string]any{"status": "SUCCESS"}),
+		testEvidence("outbox", map[string]any{"found": true, "publish_status": "PENDING"}),
+	}
+	evidence[0].ToolName = "get_payment_status"
+	evidence[1].ToolName = "get_outbox_status"
+	result := Diagnosis{
+		RootCause: "PAYMENT_EVENT_NOT_PUBLISHED", Confidence: 0.9,
+		EvidenceIDs: []string{"payment"},
+	}
+	validation := ValidateDiagnosisRootCause(result, evidence)
+	if validation.Valid {
+		t.Fatal("validation used an uncited outbox evidence")
+	}
+}

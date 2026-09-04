@@ -36,6 +36,7 @@ const InvestigatorPrompt = `你是 OrderGuard Investigator。
 - 证据不足时，在 remaining_questions 中明确说明缺口，不要设计系统之外的说法，只关注系统内部的。
 - 不得输出根因枚举、修复方案或未经证据支持的推断。
 - 订单、支付、库存、Outbox、事件和必要日志/Trace 已覆盖后，应立即输出最终 JSON，不要继续扩展检索。
+- 输入包含 supplemental_request 时，表示上一次 Diagnosis 根因未通过 Go 证据支持性校验。只针对 validation_issues 补充缺失证据或重新确认矛盾证据，并结合 previous_investigation 输出一份完整、合并后的调查结果；不得把 rejected_diagnosis 或 validation_issues 本身当作事实。
 
 最终响应必须是合法 JSON，不能输出 Markdown、解释文字、Analysis、Answer 或代码块。
 响应的第一个字符必须是 {，最后一个字符必须是 }。

@@ -121,6 +121,22 @@ type InvestigationResult struct {
 	Diagnosis          *Diagnosis `json:"diagnosis,omitempty"`
 }
 
+// SupplementalInvestigationRequest 告诉 Investigator 上一次诊断为何未通过证据校验。
+// Investigator 只能据此补充证据，不能把校验反馈当作新的事实。
+type SupplementalInvestigationRequest struct {
+	Attempt           int                 `json:"attempt"`
+	Previous          InvestigationResult `json:"previous_investigation"`
+	RejectedDiagnosis Diagnosis           `json:"rejected_diagnosis"`
+	ValidationIssues  []string            `json:"validation_issues"`
+}
+
+// RootCauseValidation 是 Go 对 Diagnosis 候选根因的支持性校验结果。
+// 它只说明候选结论是否成立，不推导或替换为另一个根因。
+type RootCauseValidation struct {
+	Valid  bool     `json:"valid"`
+	Issues []string `json:"issues,omitempty"`
+}
+
 // Diagnosis 是阶段 4 的带证据根因结论。
 type Diagnosis struct {
 	RootCause         string             `json:"root_cause"`

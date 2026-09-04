@@ -124,49 +124,103 @@ func (o *Orchestrator) Process(parent context.Context, run Run) error {
 		return err
 	}
 	if o.knowledge != nil {
-		if err := o.repository.Transition(ctx, &run, StatusKnowledgeLookup, "run.status_changed", nil); err != nil {
-			return err
+		investigation := investigatorOutput.Value
+		const maxSupplementalInvestigations = 1
+		for attempt := 0; ; attempt++ {
+			if err := o.repository.Transition(ctx, &run, StatusKnowledgeLookup, "run.status_changed", nil); err != nil {
+				return err
+			}
+			knowledgeResult, err := o.CollectKnowledge(ctx, &run, investigation)
+			if err != nil {
+				_ = o.repository.Fail(ctx, &run, StatusInconclusive, "KNOWLEDGE_FAILED", err.Error())
+				return err
+			}
+			if err := o.repository.Transition(ctx, &run, StatusDiagnosing, "run.status_changed", nil); err != nil {
+				return err
+			}
+			diagnosisStep, err := o.repository.StartStep(ctx, run.ID, "DIAGNOSIS", o.phase4ModelName, map[string]any{"order_id": run.OrderID, "attempt": attempt + 1})
+			if err != nil {
+				return err
+			}
+			diagnosis, err := o.RunDiagnosisAgent(ctx, run, investigation, knowledgeResult)
+			if err != nil {
+				_ = o.repository.FinishStep(ctx, &diagnosisStep, map[string]any{"error": err.Error()}, 0, 0, "DIAGNOSIS_INCONCLUSIVE")
+				_ = o.repository.Fail(ctx, &run, StatusInconclusive, "DIAGNOSIS_INCONCLUSIVE", err.Error())
+				return err
+			}
+			evidence, err := o.repository.ListEvidence(ctx, run.ID)
+			if err != nil {
+				return err
+			}
+			validation := ValidateDiagnosisRootCause(diagnosis, evidence)
+			if validation.Valid {
+				if err := o.repository.FinishStep(ctx, &diagnosisStep, map[string]any{"diagnosis": diagnosis, "validation": validation}, 0, 0, ""); err != nil {
+					return err
+				}
+				_, _ = o.repository.AppendEvent(ctx, run.ID, "diagnosis.validated", map[string]any{"root_cause": diagnosis.RootCause})
+				investigation.Diagnosis = &diagnosis
+				return o.repository.Complete(ctx, &run, investigation)
+			}
+
+			if err := o.repository.FinishStep(ctx, &diagnosisStep, map[string]any{"diagnosis": diagnosis, "validation": validation}, 0, 0, "DIAGNOSIS_UNSUPPORTED"); err != nil {
+				return err
+			}
+			_, _ = o.repository.AppendEvent(ctx, run.ID, "diagnosis.validation_failed", map[string]any{"root_cause": diagnosis.RootCause, "issues": validation.Issues, "attempt": attempt + 1})
+			if attempt >= maxSupplementalInvestigations {
+				err := fmt.Errorf("diagnosis root cause is not supported after supplemental investigation: %v", validation.Issues)
+				_ = o.repository.Fail(ctx, &run, StatusInconclusive, "DIAGNOSIS_UNSUPPORTED", err.Error())
+				return err
+			}
+
+			if err := o.repository.Transition(ctx, &run, StatusInvestigating, "investigation.supplement_requested", map[string]any{"root_cause": diagnosis.RootCause, "issues": validation.Issues, "attempt": attempt + 1}); err != nil {
+				return err
+			}
+			supplement := SupplementalInvestigationRequest{
+				Attempt: attempt + 1, Previous: investigation,
+				RejectedDiagnosis: diagnosis, ValidationIssues: validation.Issues,
+			}
+			supplementStep, err := o.repository.StartStep(ctx, run.ID, "INVESTIGATOR", o.investigator.ModelName(), map[string]any{
+				"message": run.UserMessage, "order_id": run.OrderID,
+				"plan": plannerOutput.Value, "supplemental_request": supplement,
+			})
+			if err != nil {
+				return err
+			}
+			supplementOutput, err := o.investigator.Run(ctx, run, supplementStep, plannerOutput.Value, supplement)
+			if err != nil {
+				code := "SUPPLEMENTAL_INVESTIGATION_FAILED"
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrToolDenied) {
+					code = "SUPPLEMENTAL_INVESTIGATION_INCONCLUSIVE"
+				}
+				_ = o.repository.FinishStep(ctx, &supplementStep, map[string]any{"raw": supplementOutput.Raw, "error": err.Error()}, supplementOutput.InputTokens, supplementOutput.OutputTokens, code)
+				_ = o.repository.Fail(ctx, &run, StatusInconclusive, code, err.Error())
+				return err
+			}
+			if err := o.repository.FinishStep(ctx, &supplementStep, supplementOutput.Value, supplementOutput.InputTokens, supplementOutput.OutputTokens, ""); err != nil {
+				return err
+			}
+			investigation = mergeInvestigationResults(investigation, supplementOutput.Value)
 		}
-		knowledgeResult, err := o.CollectKnowledge(ctx, &run, investigatorOutput.Value)
-		if err != nil {
-			_ = o.repository.Fail(ctx, &run, StatusInconclusive, "KNOWLEDGE_FAILED", err.Error())
-			return err
-		}
-		if err := o.repository.Transition(ctx, &run, StatusDiagnosing, "run.status_changed", nil); err != nil {
-			return err
-		}
-		diagnosisStep, err := o.repository.StartStep(ctx, run.ID, "DIAGNOSIS", "deterministic-phase4", map[string]any{"order_id": run.OrderID})
-		if err != nil {
-			return err
-		}
-		diagnosis, err := o.RunDiagnosisAgent(ctx, run, investigatorOutput.Value, knowledgeResult)
-		if err != nil {
-			_ = o.repository.FinishStep(ctx, &diagnosisStep, map[string]any{"error": err.Error()}, 0, 0, "DIAGNOSIS_INCONCLUSIVE")
-			_ = o.repository.Fail(ctx, &run, StatusInconclusive, "DIAGNOSIS_INCONCLUSIVE", err.Error())
-			return err
-		}
-		if err := o.repository.FinishStep(ctx, &diagnosisStep, diagnosis, 0, 0, ""); err != nil {
-			return err
-		}
-		if err := o.repository.Transition(ctx, &run, StatusCriticReview, "run.status_changed", map[string]any{"root_cause": diagnosis.RootCause}); err != nil {
-			return err
-		}
-		criticStep, err := o.repository.StartStep(ctx, run.ID, "CRITIC", "deterministic-phase4", diagnosis)
-		if err != nil {
-			return err
-		}
-		if err := o.RunCriticAgent(ctx, run, diagnosis); err != nil {
-			_ = o.repository.FinishStep(ctx, &criticStep, map[string]any{"error": err.Error()}, 0, 0, "CRITIC_REJECTED")
-			_ = o.repository.Fail(ctx, &run, StatusInconclusive, "CRITIC_REJECTED", err.Error())
-			return err
-		}
-		if err := o.repository.FinishStep(ctx, &criticStep, map[string]any{"approved": true}, 0, 0, ""); err != nil {
-			return err
-		}
-		investigatorOutput.Value.Diagnosis = &diagnosis
-		return o.repository.Complete(ctx, &run, investigatorOutput.Value)
 	}
 	return o.repository.Complete(ctx, &run, investigatorOutput.Value)
+}
+
+func mergeInvestigationResults(previous, supplemental InvestigationResult) InvestigationResult {
+	result := supplemental
+	if previous.Summary != "" && supplemental.Summary != "" {
+		result.Summary = previous.Summary + " 补充调查：" + supplemental.Summary
+	}
+	seen := make(map[string]bool, len(previous.Facts)+len(supplemental.Facts))
+	result.Facts = nil
+	for _, fact := range append(previous.Facts, supplemental.Facts...) {
+		key := fact.EvidenceID + "\x00" + fact.Fact
+		if !seen[key] {
+			seen[key] = true
+			result.Facts = append(result.Facts, fact)
+		}
+	}
+	result.Diagnosis = nil
+	return result
 }
 
 // RunWorker 持续领取 CREATED 任务并执行调查。

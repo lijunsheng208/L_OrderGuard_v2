@@ -15,7 +15,7 @@ var transitions = map[Status]map[Status]bool{
 		StatusInconclusive: true, StatusCancelled: true,
 	},
 	StatusKnowledgeLookup:   {StatusDiagnosing: true, StatusInconclusive: true, StatusCancelled: true},
-	StatusDiagnosing:        {StatusCriticReview: true, StatusInconclusive: true, StatusCancelled: true},
+	StatusDiagnosing:        {StatusInvestigating: true, StatusEvidenceCollected: true, StatusCriticReview: true, StatusInconclusive: true, StatusCancelled: true},
 	StatusCriticReview:      {StatusEvidenceCollected: true, StatusNoAnomaly: true, StatusInconclusive: true, StatusCancelled: true},
 	StatusEvidenceCollected: {StatusPolicyCheck: true, StatusNoAnomaly: true},
 	StatusPolicyCheck:       {StatusAwaitingApproval: true, StatusRejected: true, StatusInconclusive: true},

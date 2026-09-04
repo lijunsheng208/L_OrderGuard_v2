@@ -18,10 +18,9 @@ const agentPath: { key: string; label: string; icon: LucideIcon }[] = [
   { key: 'INVESTIGATOR', label: 'Investigator', icon: SearchCheck },
   { key: 'KNOWLEDGE', label: 'Knowledge', icon: BookOpen },
   { key: 'DIAGNOSIS', label: 'Diagnosis', icon: Stethoscope },
-  { key: 'CRITIC', label: 'Critic', icon: ShieldCheck },
   { key: 'VERIFY', label: 'Verify', icon: ShieldCheck },
 ]
-const statusAgent: Record<string, string> = { PLANNING: 'PLANNER', INVESTIGATING: 'INVESTIGATOR', KNOWLEDGE_LOOKUP: 'KNOWLEDGE', DIAGNOSING: 'DIAGNOSIS', CRITIC_REVIEW: 'CRITIC', VERIFYING: 'VERIFY' }
+const statusAgent: Record<string, string> = { PLANNING: 'PLANNER', INVESTIGATING: 'INVESTIGATOR', KNOWLEDGE_LOOKUP: 'KNOWLEDGE', DIAGNOSING: 'DIAGNOSIS', VERIFYING: 'VERIFY' }
 const repairAction: Record<string, string> = { PAYMENT_EVENT_NOT_CREATED: 'REBUILD_OUTBOX_EVENT', PAYMENT_EVENT_NOT_PUBLISHED: 'RETRY_OUTBOX_PUBLISH', INVENTORY_EVENT_NOT_CONSUMED: 'RETRY_INVENTORY_CONSUMER', INVENTORY_DEDUCTION_FAILED: 'RETRY_INVENTORY_CONSUMER', INVENTORY_DEDUCTION_NOT_PERSISTED: 'RECONCILE_INVENTORY_STATE' }
 const faultScenarios = [
   { value: 'OUTBOX_NOT_CREATED', label: 'Outbox 未创建', tool: 'rebuild_outbox_event' },

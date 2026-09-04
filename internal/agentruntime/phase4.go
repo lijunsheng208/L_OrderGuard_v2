@@ -18,7 +18,7 @@ import (
 // RunDiagnosisAgent 调用 Eino Diagnosis Agent 并校验结构化输出。
 func (o *Orchestrator) RunDiagnosisAgent(ctx context.Context, run Run, investigation InvestigationResult, knowledge KnowledgeResult) (Diagnosis, error) {
 	if o.phase4Model == nil {
-		return o.DiagnoseFromEvidence(ctx, run)
+		return Diagnosis{}, errors.New("diagnosis agent model is not configured")
 	}
 	evidence, err := o.repository.ListEvidence(ctx, run.ID)
 	if err != nil {
@@ -37,17 +37,6 @@ func (o *Orchestrator) RunDiagnosisAgent(ctx context.Context, run Run, investiga
 	var result Diagnosis
 	if err := decodeModelJSON(response.Content, &result); err != nil {
 		return Diagnosis{}, fmt.Errorf("decode diagnosis: %w", err)
-	}
-	// Keep the model's explanation fields, but let strong structured evidence own
-	// the root-cause classification.
-	if expected := deterministicDiagnosis(evidence); expected.Confidence >= 0.78 || evidenceRequiresInconclusive(evidence) {
-		result.RootCause = expected.RootCause
-		result.Confidence = expected.Confidence
-		result.EvidenceIDs = expected.EvidenceIDs
-		result.RecommendedAction = expected.RecommendedAction
-	}
-	if err := validateDiagnosis(result, evidence); err != nil {
-		return Diagnosis{}, err
 	}
 	return result, nil
 }
@@ -96,29 +85,91 @@ func (o *Orchestrator) RunCriticAgent(ctx context.Context, run Run, diagnosis Di
 	return nil
 }
 
-func validateDiagnosis(result Diagnosis, evidence []Evidence) error {
-	allowed := RootCauseCodes()
-	if !allowed[result.RootCause] || result.Confidence < 0 || result.Confidence > 1 || len(result.EvidenceIDs) == 0 {
-		return errors.New("invalid diagnosis output")
-	}
-	known := map[string]bool{}
+// ValidateDiagnosisRootCause verifies only whether the Diagnosis Agent's
+// selected root cause is supported by its cited evidence. It intentionally
+// never derives or substitutes a different root cause.
+func ValidateDiagnosisRootCause(result Diagnosis, evidence []Evidence) RootCauseValidation {
+	validation := RootCauseValidation{}
+	known := make(map[string]Evidence, len(evidence))
 	for _, item := range evidence {
-		known[item.EvidenceID] = true
+		known[item.EvidenceID] = item
 	}
+	if !RootCauseCodes()[result.RootCause] {
+		validation.Issues = append(validation.Issues, "根因不属于允许的根因目录")
+		return validation
+	}
+	if len(result.EvidenceIDs) == 0 {
+		validation.Issues = append(validation.Issues, "根因没有引用任何证据")
+		return validation
+	}
+
+	selected := make([]Evidence, 0, len(result.EvidenceIDs))
+	seen := map[string]bool{}
 	for _, id := range result.EvidenceIDs {
-		if !known[id] {
-			return fmt.Errorf("diagnosis references unknown evidence_id %s", id)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		item, ok := known[id]
+		if !ok {
+			validation.Issues = append(validation.Issues, "根因引用了不存在的证据 "+id)
+			continue
+		}
+		selected = append(selected, item)
+	}
+	if len(validation.Issues) > 0 {
+		return validation
+	}
+
+	signals := diagnosticSignals{}
+	for _, item := range selected {
+		signals.observe(item)
+	}
+	require := func(condition bool, issue string) {
+		if !condition {
+			validation.Issues = append(validation.Issues, issue)
 		}
 	}
-	for _, alternative := range result.Alternatives {
-		if !allowed[alternative.Cause] || alternative.Confidence < 0 || alternative.Confidence > 1 {
-			return fmt.Errorf("invalid alternative root cause %s", alternative.Cause)
-		}
+	if signals.dirtyData || signals.consumerSuccess && signals.consumerFailure {
+		validation.Issues = append(validation.Issues, "引用证据包含脏数据或互相冲突的消费结果")
 	}
-	if result.RootCause == "NO_CONFIRMED_ROOT_CAUSE" && result.Confidence > 0.5 {
-		return errors.New("inconclusive diagnosis confidence is too high")
+
+	switch result.RootCause {
+	case "NO_ISSUE":
+		require(signals.paymentSuccess, "缺少支付 SUCCESS 证据")
+		require(signals.hasOutbox && signals.outboxStatus == "PUBLISHED", "缺少 Outbox PUBLISHED 证据")
+		require(signals.inventoryDeducted, "缺少库存 DEDUCTED 证据")
+		require(!signals.consumerFailure, "存在库存消费者失败证据")
+	case "PAYMENT_EVENT_NOT_CREATED":
+		require(signals.paymentSuccess, "缺少支付 SUCCESS 证据")
+		require(signals.hasOutbox && signals.outboxFound != nil && !*signals.outboxFound, "缺少 Outbox found=false 证据")
+	case "PAYMENT_EVENT_NOT_PUBLISHED":
+		require(signals.paymentSuccess, "缺少支付 SUCCESS 证据")
+		require(signals.hasOutbox && (signals.outboxStatus == "PENDING" || signals.outboxStatus == "FAILED"), "缺少 Outbox PENDING 或 FAILED 证据")
+	case "EVENT_NOT_AVAILABLE_AFTER_PUBLISH":
+		require(signals.hasOutbox && signals.outboxStatus == "PUBLISHED", "缺少 Outbox PUBLISHED 证据")
+		require(signals.eventFound != nil && !*signals.eventFound, "缺少事件 found=false 证据")
+	case "INVENTORY_EVENT_NOT_CONSUMED":
+		require(signals.eventFound != nil && *signals.eventFound, "缺少 payment.succeeded 事件存在的证据")
+		require(signals.inventoryNotDeducted, "缺少库存 NOT_DEDUCTED 证据")
+		require(!signals.consumerReceived && !signals.consumerSuccess && !signals.consumerFailure, "现有证据表明库存消费者已经处理或尝试处理事件")
+	case "INVENTORY_DEDUCTION_FAILED":
+		require(signals.inventoryNotDeducted, "缺少库存 NOT_DEDUCTED 证据")
+		require(signals.consumerReceived && signals.consumerFailure, "缺少库存消费者接收事件并处理失败的证据")
+	case "INVENTORY_DEDUCTION_NOT_PERSISTED":
+		require(signals.inventoryNotDeducted, "缺少库存 NOT_DEDUCTED 证据")
+		require(signals.consumerSuccess, "缺少库存扣减成功或 OK 的日志/Trace 证据")
+		require(!signals.consumerFailure, "存在库存扣减失败或回滚证据")
+	case "INVENTORY_CONSUMER_UNAVAILABLE":
+		require(signals.hasOutbox && signals.outboxStatus == "PUBLISHED", "缺少 Outbox PUBLISHED 证据")
+		require(signals.inventoryNotDeducted, "缺少库存 NOT_DEDUCTED 证据")
+		require(signals.consumerFailure, "缺少库存消费者不可用或处理失败的证据")
+	case "NO_CONFIRMED_ROOT_CAUSE":
+		validation.Issues = append(validation.Issues, "Diagnosis 尚未确认根因，需要补充调查")
 	}
-	return nil
+
+	validation.Valid = len(validation.Issues) == 0
+	return validation
 }
 
 // ProcessPhase4 在 Investigator 后执行知识检索、诊断和 Critic 审查。
@@ -416,35 +467,16 @@ func evidenceRequiresInconclusive(evidence []Evidence) bool {
 	return signals.dirtyData || signals.consumerSuccess && signals.consumerFailure
 }
 
-// CriticReview 校验诊断证据引用和允许的根因枚举。
+// CriticReview 保留为兼容入口，只校验候选根因是否被引用证据支持。
+// 它不再计算“预期根因”，也不会覆盖 Diagnosis Agent 的结论。
 func (o *Orchestrator) CriticReview(ctx context.Context, runID string, diagnosis Diagnosis) error {
 	evidence, err := o.repository.ListEvidence(ctx, runID)
 	if err != nil {
 		return err
 	}
-	known := map[string]bool{}
-	for _, e := range evidence {
-		known[e.EvidenceID] = true
-	}
-	for _, id := range diagnosis.EvidenceIDs {
-		if !known[id] {
-			return fmt.Errorf("critic rejected unknown evidence_id %s", id)
-		}
-	}
-	if !RootCauseCodes()[diagnosis.RootCause] {
-		return errors.New("critic rejected unknown root cause")
-	}
-	signals := diagnosticSignals{}
-	for _, item := range evidence {
-		signals.observe(item)
-	}
-	if signals.hasInventory && signals.hasPayment {
-		expected := signals.diagnosis(nil)
-		// A deterministic, high-confidence classification must not be overridden by
-		// a model conclusion that contradicts the observed state machine.
-		if (expected.Confidence >= 0.78 || evidenceRequiresInconclusive(evidence)) && diagnosis.RootCause != expected.RootCause {
-			return fmt.Errorf("critic rejected diagnosis: expected %s from evidence, got %s", expected.RootCause, diagnosis.RootCause)
-		}
+	validation := ValidateDiagnosisRootCause(diagnosis, evidence)
+	if !validation.Valid {
+		return fmt.Errorf("diagnosis root cause is not supported: %v", validation.Issues)
 	}
 	return nil
 }
