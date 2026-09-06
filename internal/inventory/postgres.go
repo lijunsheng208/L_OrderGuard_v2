@@ -135,14 +135,22 @@ func (r *Repository) consume(ctx context.Context, event payment.Event, bypassDem
 		case "INVENTORY_EVENT_NOT_CONSUMED":
 			return nil, errors.New("demo inventory event consumption is paused")
 		case "INVENTORY_CONSUMER_FAILED":
-			_ = r.recordDemoSignal(ctx, event, "consume_payment_event", "ERROR", "inventory consumer failed while processing payment event")
+			if err := r.recordDemoSignal(ctx, event, "consume_payment_event", "ERROR", "inventory consumer failed while processing payment event"); err != nil {
+				return nil, fmt.Errorf("record demo consumer failure: %w", err)
+			}
 			return nil, errors.New("demo inventory consumer failed")
 		case "INVENTORY_DEDUCTION_NOT_PERSISTED":
-			_ = r.recordDemoSignal(ctx, event, "deduct_inventory", "OK", "inventory deduction reported success but transaction was not persisted")
+			if err := r.recordDemoSignal(ctx, event, "deduct_inventory", "OK", "inventory deduction reported success but transaction was not persisted"); err != nil {
+				return nil, fmt.Errorf("record demo persistence failure: %w", err)
+			}
 			return nil, errors.New("demo inventory deduction persistence failed")
 		case "EVIDENCE_CONFLICT":
-			_ = r.recordDemoSignal(ctx, event, "deduct_inventory", "OK", "inventory deduction reported success")
-			_ = r.recordDemoSignal(ctx, event, "deduct_inventory", "ERROR", "inventory deduction reported rollback")
+			if err := r.recordDemoSignal(ctx, event, "deduct_inventory", "OK", "inventory deduction reported success"); err != nil {
+				return nil, fmt.Errorf("record demo conflicting success: %w", err)
+			}
+			if err := r.recordDemoSignal(ctx, event, "deduct_inventory", "ERROR", "inventory deduction reported rollback"); err != nil {
+				return nil, fmt.Errorf("record demo conflicting rollback: %w", err)
+			}
 			return nil, errors.New("demo conflicting inventory evidence")
 		}
 	}
@@ -268,7 +276,11 @@ func (r *Repository) recordDemoSignal(ctx context.Context, event payment.Event, 
 	if traceID == "" {
 		traceID = tracing.NewID()
 	}
-	_, err := r.db.Exec(ctx, `INSERT INTO observability.signals(trace_id,order_id,service_name,signal_type,operation,status,message,attributes,started_at,finished_at) VALUES($1,$2,'inventory-service','LOG',$3,$4,$5,jsonb_build_object('event_id',$6),now(),now())`, traceID, event.AggregateID, operation, status, message, event.EventID)
+	attributes, err := json.Marshal(map[string]any{"event_id": event.EventID})
+	if err != nil {
+		return fmt.Errorf("encode demo signal attributes: %w", err)
+	}
+	_, err = r.db.Exec(ctx, `INSERT INTO observability.signals(trace_id,order_id,service_name,signal_type,operation,status,message,attributes,started_at,finished_at) VALUES($1,$2,'inventory-service','LOG',$3,$4,$5,$6::jsonb,now(),now())`, traceID, event.AggregateID, operation, status, message, attributes)
 	return err
 }
 

@@ -28,12 +28,15 @@ func (c *Consumer) Run(ctx context.Context) error {
 		return err
 	}
 	for {
-		messages, err := c.stream.ClaimPending(ctx, 30*time.Second, 20)
+		// Read new deliveries first. A permanently failing pending message must
+		// not starve later events and prevent their diagnostic signals from being
+		// recorded. Pending work is retried whenever there are no new messages.
+		messages, err := c.stream.Consume(ctx, 20, time.Second)
 		if err != nil {
 			return err
 		}
 		if len(messages) == 0 {
-			messages, err = c.stream.Consume(ctx, 20, time.Second)
+			messages, err = c.stream.ClaimPending(ctx, 30*time.Second, 20)
 			if err != nil {
 				return err
 			}

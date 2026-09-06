@@ -32,6 +32,7 @@ func NewHandler(repository *Repository, orchestrator *Orchestrator) http.Handler
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handler.health)
 	mux.HandleFunc("POST /api/v1/investigations", handler.createRun)
+	mux.HandleFunc("POST /api/v1/evaluations/single-agent/start", handler.startSingleAgentEvaluationRun)
 	mux.HandleFunc("POST /api/v1/evaluations/single-agent/runs", handler.createSingleAgentEvaluationRun)
 	mux.HandleFunc("GET /api/v1/investigations/{id}", handler.getRun)
 	mux.HandleFunc("GET /api/v1/investigations/{id}/steps", handler.getSteps)
@@ -44,12 +45,33 @@ func NewHandler(repository *Repository, orchestrator *Orchestrator) http.Handler
 	return tracing.Middleware(cors(mux))
 }
 
+// startSingleAgentEvaluationRun creates the Runtime-owned run shell without
+// starting the multi-agent worker. The external single agent then fills this
+// same run with its plan, evidence, and diagnosis.
+func (h *Handler) startSingleAgentEvaluationRun(w http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Message string `json:"message"`
+		OrderID string `json:"order_id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, request.Body, 1<<16)).Decode(&input); err != nil || strings.TrimSpace(input.OrderID) == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_EVALUATION", "message and order_id are required")
+		return
+	}
+	run, err := h.repository.CreateRun(request.Context(), input.Message, input.OrderID, tracing.ID(request.Context()))
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "CREATE_EVALUATION_RUN_FAILED", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, run)
+}
+
 // createSingleAgentEvaluationRun imports a single-agent diagnosis into the
 // normal Runtime lifecycle. It is intentionally namespaced under evaluations:
 // the endpoint is for reproducible architecture comparisons, not production
 // investigation creation.
 func (h *Handler) createSingleAgentEvaluationRun(w http.ResponseWriter, request *http.Request) {
 	var input struct {
+		RunID     string               `json:"run_id"`
 		Message   string               `json:"message"`
 		OrderID   string               `json:"order_id"`
 		Plan      Plan                 `json:"plan"`
@@ -65,9 +87,19 @@ func (h *Handler) createSingleAgentEvaluationRun(w http.ResponseWriter, request 
 		httpx.WriteError(w, http.StatusBadRequest, "INVALID_EVALUATION", "order_id and diagnosis.root_cause are required")
 		return
 	}
-	run, err := h.repository.CreateRun(request.Context(), input.Message, input.OrderID, tracing.ID(request.Context()))
+	var run Run
+	var err error
+	if strings.TrimSpace(input.RunID) != "" {
+		run, err = h.repository.GetRun(request.Context(), input.RunID)
+	} else {
+		run, err = h.repository.CreateRun(request.Context(), input.Message, input.OrderID, tracing.ID(request.Context()))
+	}
 	if err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "CREATE_EVALUATION_RUN_FAILED", err.Error())
+		return
+	}
+	if run.OrderID != input.OrderID {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_EVALUATION", "run_id does not belong to order_id")
 		return
 	}
 	// Reuse the existing DIAGNOSIS step type so the evaluation run remains
@@ -104,6 +136,22 @@ func (h *Handler) createSingleAgentEvaluationRun(w http.ResponseWriter, request 
 			httpx.WriteError(w, 500, "SAVE_EVALUATION_EVIDENCE_FAILED", err.Error())
 			return
 		}
+	}
+	// Single-agent investigations use the same Go evidence validator as the
+	// production multi-agent path. The evaluation endpoint must not accept a
+	// model diagnosis merely because it matches the test oracle.
+	evidence, err := h.repository.ListEvidence(request.Context(), run.ID)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "QUERY_EVALUATION_EVIDENCE_FAILED", err.Error())
+		return
+	}
+	validation := ValidateDiagnosisRootCause(input.Diagnosis, evidence)
+	if !validation.Valid {
+		result := InvestigationResult{Summary: "single-agent evaluation diagnosis", Diagnosis: &input.Diagnosis}
+		_ = h.repository.FinishStep(request.Context(), &step, map[string]any{"diagnosis": input.Diagnosis, "validation": validation}, 0, 0, "DIAGNOSIS_UNSUPPORTED")
+		_ = h.repository.CompleteStatus(request.Context(), &run, result, StatusInconclusive)
+		httpx.WriteJSON(w, http.StatusAccepted, run)
+		return
 	}
 	if err := h.repository.CompleteStatus(request.Context(), &run, result, StatusEvidenceCollected); err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "COMPLETE_EVALUATION_RUN_FAILED", err.Error())
